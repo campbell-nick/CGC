@@ -64,6 +64,19 @@ as the default host for the
 .IR owner/repo
 shorthand.
 .TP
+.BR \-b ", " \-\-branch " \fIname\fR"
+Check out
+.I name
+(a branch or tag) instead of the remote's default branch. Tags are checked
+out in detached HEAD state.
+.TP
+.B \-\-depth \fIn\fR
+Create a shallow clone with history truncated to
+.I n
+commits. Writes
+.B .git/shallow
+with the shallow boundary.
+.TP
 .BR \-q ", " \-\-quiet
 Suppress progress messages and status output.
 .TP

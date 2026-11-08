@@ -25,7 +25,9 @@ void remote_refs_free(RemoteRefs *r);
 /* Discover capabilities and list refs via protocol v2. */
 int protocol_ls_refs(const char *url, RemoteRefs *out);
 
-/* Fetch the pack needed for all refs and unpack it into the object db. */
-int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir);
+/* Fetch the pack needed for all refs and unpack it into the object db.
+ * If depth > 0, perform a shallow fetch of that depth and write .git/shallow. */
+int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
+                   int depth);
 
 #endif

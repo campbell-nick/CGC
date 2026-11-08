@@ -141,6 +141,20 @@ int repo_set_head(const char *gitdir, const char *default_ref)
     return rc;
 }
 
+int repo_set_head_detached(const char *gitdir,
+                           const unsigned char commit_oid[OID_RAW])
+{
+    char hex[OID_HEX + 1];
+    oid_hex(commit_oid, hex);
+    char *path = path_join(gitdir, "HEAD");
+    char line[OID_HEX + 2];
+    memcpy(line, hex, OID_HEX);
+    line[OID_HEX] = '\n';
+    int rc = write_file(path, line, OID_HEX + 1, 0644);
+    free(path);
+    return rc;
+}
+
 int repo_write_config(const char *gitdir, const char *url,
                       const char *default_ref)
 {

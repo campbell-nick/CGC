@@ -303,6 +303,10 @@ typedef struct {
     int sideband;  /* -1 undecided, 0 raw, 1 sideband */
     int done;
     int failed;
+    int shallow_section;
+    unsigned char (*shallow)[OID_RAW];
+    size_t nshallow;
+    size_t capshallow;
     Buf pack;
     Buf pending;
     Buf error;
@@ -323,18 +327,44 @@ static void demux_line(FetchDemux *d, const unsigned char *line, size_t len)
         if (is_section_name(line, len, "packfile")) {
             d->section = 1;
             d->sideband = -1;
+            d->shallow_section = 0;
+        } else if (is_section_name(line, len, "shallow-info")) {
+            d->section = 2;
+            d->shallow_section = 1;
         } else if (is_section_name(line, len, "acknowledgments") ||
-                   is_section_name(line, len, "shallow-info") ||
                    is_section_name(line, len, "wanted-refs") ||
                    is_section_name(line, len, "packfile-uris")) {
             d->section = 2;
+            d->shallow_section = 0;
         } else if (len >= 4 && memcmp(line, "PACK", 4) == 0) {
             d->section = 1;
             d->sideband = 0;
+            d->shallow_section = 0;
             buf_append(&d->pack, line, len);
             progress_receive_update(d->pack.len);
         } else {
             d->section = 2;
+            d->shallow_section = 0;
+        }
+        return;
+    }
+
+    if (d->section == 2) {
+        if (d->shallow_section) {
+            char *s = trim_newline(line, len);
+            const char *p = s;
+            if (strncmp(p, "shallow ", 8) == 0)
+                p += 8;
+            unsigned char oid[OID_RAW];
+            if (oid_parse(p, oid) == 0) {
+                if (d->nshallow == d->capshallow) {
+                    d->capshallow = d->capshallow ? d->capshallow * 2 : 8;
+                    d->shallow = xrealloc(d->shallow,
+                                          d->capshallow * OID_RAW);
+                }
+                memcpy(d->shallow[d->nshallow++], oid, OID_RAW);
+            }
+            free(s);
         }
         return;
     }
@@ -451,7 +481,8 @@ static void delta_progress(void *ud, uint32_t done, uint32_t total)
     progress_deltas_update(done, total);
 }
 
-int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir)
+int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
+                   int depth)
 {
     if (refs->empty)
         return 0;
@@ -488,6 +519,11 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir)
     pkt_write_str(&req, "ofs-delta\n");
     if (!progress_live_enabled())
         pkt_write_str(&req, "no-progress\n");
+    if (depth > 0) {
+        char line[64];
+        snprintf(line, sizeof(line), "deepen %d\n", depth);
+        pkt_write_str(&req, line);
+    }
     for (size_t i = 0; i < nwants; i++) {
         char hex[OID_HEX + 1];
         oid_hex(wants[i], hex);
@@ -515,6 +551,7 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir)
         buf_free(&demux.pack);
         buf_free(&demux.pending);
         buf_free(&demux.error);
+        free(demux.shallow);
         return -1;
     }
 
@@ -526,6 +563,7 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir)
         buf_free(&demux.pack);
         buf_free(&demux.pending);
         buf_free(&demux.error);
+        free(demux.shallow);
         return -1;
     }
 
@@ -535,6 +573,7 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir)
         buf_free(&demux.pack);
         buf_free(&demux.pending);
         buf_free(&demux.error);
+        free(demux.shallow);
         return -1;
     }
 
@@ -546,6 +585,7 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir)
         buf_free(&demux.pack);
         buf_free(&demux.pending);
         buf_free(&demux.error);
+        free(demux.shallow);
         return -1;
     }
 
@@ -574,8 +614,33 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir)
     if (rc != 0) {
         progress_clear();
         warn_cgc("failed to unpack packfile");
-        return -1;
+        /* fall through to cleanup shallow list */
+    } else {
+        progress_deltas_end(stats.deltas);
+
+        if (depth > 0 && demux.nshallow > 0) {
+            char *shallow_path = path_join(gitdir, "shallow");
+            Buf sb;
+            buf_init(&sb);
+            for (size_t i = 0; i < demux.nshallow; i++) {
+                char hex[OID_HEX + 1];
+                oid_hex(demux.shallow[i], hex);
+                buf_appendf(&sb, "%s\n", hex);
+            }
+            if (write_file(shallow_path, sb.data, sb.len, 0644) != 0)
+                warn_cgc("could not write .git/shallow");
+            buf_free(&sb);
+            free(shallow_path);
+        }
     }
-    progress_deltas_end(stats.deltas);
+
+    /* cleanup demux shallow list */
+    free(demux.shallow);
+    demux.shallow = NULL;
+    demux.nshallow = 0;
+    demux.capshallow = 0;
+
+    if (rc != 0)
+        return -1;
     return 0;
 }

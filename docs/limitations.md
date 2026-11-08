@@ -5,6 +5,8 @@
 - Smart HTTP protocol v2 over HTTPS (plain HTTP is accepted for local testing)
 - Redirects, chunked transfer encoding, and verified TLS
 - Branches, annotated tags, remote-tracking refs
+- `--branch`/`-b` to check out a branch or tag (detached HEAD for tags)
+- `--depth <n>` shallow clones (writes `.git/shallow`)
 - `ofs-delta` and `ref-delta` resolution, including delta chains
 - Nested trees, symlinks, executable files
 - Empty repositories (creates `.git` with the advertised default branch)
@@ -21,8 +23,10 @@
 - SHA-1 repositories only (SHA-256 object format is detected and rejected).
 - The whole pack and all inflated objects are held in memory. Small and medium
   repositories are fine; huge repositories need a streaming implementation.
-- No shallow/partial/filtered clone, no submodule recursion, no Git LFS,
+- No partial/filtered clone, no submodule recursion (`--recursive`), no Git LFS,
   no hooks, no reflogs.
+- Shallow clones fetch every branch's history within the requested depth
+  (no `--single-branch` yet).
 - No retry or resume on network failures.
 
 ## Roadmap

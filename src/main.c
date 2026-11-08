@@ -31,6 +31,9 @@ static void usage(FILE *out)
             "\n"
             "options:\n"
             "  --host <host>   default host for owner/repo (env CGC_DEFAULT_HOST)\n"
+            "  -b, --branch <name>\n"
+            "                 checkout <name> instead of the remote's default branch\n"
+            "  --depth <n>     create a shallow clone with history truncated to n commits\n"
             "  -q, --quiet     suppress progress messages\n"
             "  -h, --help      show this help\n"
             "  -V, --version   show version\n");
@@ -97,6 +100,8 @@ int main(int argc, char **argv)
         host = "github.com";
 
     int quiet = 0;
+    const char *branch = NULL;
+    int depth = 0;
     const char *positional[3];
     int npos = 0;
 
@@ -114,6 +119,16 @@ int main(int argc, char **argv)
             if (i + 1 >= argc)
                 die("--host requires an argument");
             host = argv[++i];
+        } else if (strcmp(a, "-b") == 0 || strcmp(a, "--branch") == 0) {
+            if (i + 1 >= argc)
+                die("--branch requires an argument");
+            branch = argv[++i];
+        } else if (strcmp(a, "--depth") == 0) {
+            if (i + 1 >= argc)
+                die("--depth requires an argument");
+            depth = atoi(argv[++i]);
+            if (depth <= 0)
+                die("--depth must be a positive integer");
         } else if (strcmp(a, "--") == 0) {
             for (i++; i < argc; i++) {
                 if (npos >= 2)
@@ -168,21 +183,89 @@ int main(int argc, char **argv)
         die("cannot read refs from %s", url);
     }
 
+    /* Resolve the requested branch/tag (or the remote's default). */
     const char *head_ref = refs.default_ref ? refs.default_ref : "refs/heads/main";
+    unsigned char target_oid[OID_RAW];
+    memset(target_oid, 0, sizeof(target_oid));
+    int has_target = refs.has_default_oid;
+    int detached = 0;
+    const char *config_ref = head_ref;
 
-    if (repo_write_config(gitdir, url, head_ref) != 0 ||
-        repo_set_head(gitdir, head_ref) != 0)
+    if (branch) {
+        if (refs.empty)
+            die("cannot checkout '%s' in an empty repository", branch);
+
+        Ref *chosen = NULL;
+        char buf[512];
+        snprintf(buf, sizeof(buf), "refs/heads/%s", branch);
+        /* store candidates in static-ish buffers via direct comparison */
+        /* We'll search by trying full names. */
+        for (size_t i = 0; i < refs.count; i++) {
+            Ref *r = &refs.refs[i];
+            if (strcmp(r->name, branch) == 0 ||
+                strcmp(r->name, buf) == 0) {
+                chosen = r;
+                break;
+            }
+            char tbuf[512];
+            snprintf(tbuf, sizeof(tbuf), "refs/tags/%s", branch);
+            if (strcmp(r->name, tbuf) == 0) {
+                chosen = r;
+                break;
+            }
+        }
+        if (!chosen) {
+            /* try refs/tags/<branch> explicitly */
+            char tbuf[512];
+            snprintf(tbuf, sizeof(tbuf), "refs/tags/%s", branch);
+            for (size_t i = 0; i < refs.count; i++) {
+                if (strcmp(refs.refs[i].name, tbuf) == 0) {
+                    chosen = &refs.refs[i];
+                    break;
+                }
+            }
+        }
+        if (!chosen)
+            die("Remote branch or tag '%s' not found in upstream origin", branch);
+
+        if (chosen->has_peeled)
+            memcpy(target_oid, chosen->peeled, OID_RAW);
+        else
+            memcpy(target_oid, chosen->oid, OID_RAW);
+        has_target = 1;
+
+        if (strncmp(chosen->name, "refs/heads/", 11) == 0) {
+            detached = 0;
+            head_ref = chosen->name;
+            config_ref = chosen->name;
+        } else {
+            detached = 1;
+            head_ref = NULL;
+            config_ref = NULL;
+        }
+    } else if (refs.has_default_oid) {
+        memcpy(target_oid, refs.default_oid, OID_RAW);
+    }
+
+    if (repo_write_config(gitdir, url, config_ref) != 0)
         die("cannot write repository configuration");
+    if (detached) {
+        if (repo_set_head_detached(gitdir, target_oid) != 0)
+            die("cannot write HEAD");
+    } else {
+        if (repo_set_head(gitdir, head_ref) != 0)
+            die("cannot write HEAD");
+    }
 
     if (!refs.empty) {
-        if (protocol_fetch(url, &refs, gitdir) != 0) {
+        if (protocol_fetch(url, &refs, gitdir, depth) != 0) {
             remote_refs_free(&refs);
             die("fetch failed");
         }
         repo_write_refs(gitdir, &refs);
 
-        if (refs.has_default_oid) {
-            if (checkout_commit(gitdir, dest, refs.default_oid) != 0) {
+        if (has_target) {
+            if (checkout_commit(gitdir, dest, target_oid) != 0) {
                 remote_refs_free(&refs);
                 die("checkout failed");
             }

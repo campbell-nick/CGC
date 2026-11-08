@@ -37,6 +37,10 @@ CGC_DEFAULT_HOST=git.example.com cgc team/repo
 
 ```
 --host <host>   default host for owner/repo shorthand
+-b, --branch <name>
+                check out <name> (branch or tag) instead of the remote's
+                default branch; tags are checked out in detached HEAD state
+--depth <n>     create a shallow clone with history truncated to n commits
 -q, --quiet     suppress progress messages
 -h, --help      show help
 -V, --version   show version
