@@ -6,6 +6,7 @@ LDLIBS  += $(shell pkg-config --libs zlib openssl 2>/dev/null || echo -lz -lssl 
 
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
+MANDIR  ?= $(PREFIX)/share/man/man1
 
 SRC := $(wildcard src/*.c)
 OBJ := $(SRC:.c=.o)
@@ -25,8 +26,11 @@ clean:
 install: cgc
 	install -d "$(DESTDIR)$(BINDIR)"
 	install -m 755 cgc "$(DESTDIR)$(BINDIR)/cgc"
+	install -d "$(DESTDIR)$(MANDIR)"
+	install -m 644 cgc.1 "$(DESTDIR)$(MANDIR)/cgc.1"
 
 uninstall:
 	rm -f "$(DESTDIR)$(BINDIR)/cgc"
+	rm -f "$(DESTDIR)$(MANDIR)/cgc.1"
 
 .PHONY: clean install uninstall test

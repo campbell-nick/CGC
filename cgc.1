@@ -1,0 +1,129 @@
+.TH CGC 1 "2026-11-08" "cgc 0.1.0" "User Commands"
+.SH NAME
+cgc \- clone a Git repository over smart HTTP
+.SH SYNOPSIS
+.B cgc
+[\fIOPTIONS\fR] \fIREPOSITORY\fR [\fIDIRECTORY\fR]
+.SH DESCRIPTION
+.B cgc
+is a self-contained implementation of
+.BR git-clone (1)
+that speaks the Git smart HTTP protocol (version 2) directly.
+It downloads the packfile, verifies and unpacks it, resolves deltas, writes
+loose objects, refs and configuration, and checks out the working tree with a
+Git-compatible index.
+.PP
+If
+.I DIRECTORY
+is omitted, the directory name is derived from the repository name, with any
+trailing
+.B .git
+removed.
+.SH "REPOSITORY FORMS"
+.TP
+.B https://\fIhost\fR/\fIowner\fR/\fIrepo\fR[.git]
+An explicit URL. Plain
+.B http://
+is accepted for local testing.
+.TP
+.B gh:\fIowner\fR/\fIrepo\fR
+Expands to
+.BR https://github.com/\fIowner\fR/\fIrepo\fR.git .
+.TP
+.B gl:\fIowner\fR/\fIrepo\fR
+Expands to
+.BR https://gitlab.com/\fIowner\fR/\fIrepo\fR.git .
+.TP
+.B bb:\fIowner\fR/\fIrepo\fR
+Expands to
+.BR https://bitbucket.org/\fIowner\fR/\fIrepo\fR.git .
+.TP
+.B sym:\fIowner\fR/\fIrepo\fR
+Expands to
+.BR https://git.symlinx.net/\fIowner\fR/\fIrepo\fR.git .
+.TP
+.B \fIowner\fR/\fIrepo\fR
+Expands to
+.BR https://\fIdefault-host\fR/\fIowner\fR/\fIrepo\fR.git .
+The default host is
+.B github.com
+and can be changed with
+.B \-\-host
+or
+.BR CGC_DEFAULT_HOST .
+.TP
+.B \fIhost.tld\fR/\fIowner\fR/\fIrepo\fR
+Expands to
+.BR https://\fIhost.tld\fR/\fIowner\fR/\fIrepo\fR.git .
+.SH OPTIONS
+.TP
+.B \-\-host \fIhost\fR
+Use
+.I host
+as the default host for the
+.IR owner/repo
+shorthand.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress progress messages and status output.
+.TP
+.BR \-h ", " \-\-help
+Print usage information and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.TP
+.B \-\-
+Treat all remaining arguments as positional, even if they begin with a dash.
+.SH EXAMPLES
+.nf
+cgc gh:octocat/Hello-World
+cgc sym:team/repo
+cgc octocat/Hello-World my-copy
+cgc https://github.com/torvalds/linux.git
+cgc \-\-host git.example.com team/repo
+CGC_DEFAULT_HOST=git.example.com cgc team/repo
+.fi
+.SH OUTPUT
+Status is written to standard error in the style of
+.BR git-clone (1):
+.BR "Cloning into '...'..." ,
+any
+.B remote:
+messages sent by the server, a
+.B Receiving objects
+download meter,
+.BR "Resolving deltas" ,
+and
+.B Updating files
+during checkout.
+Live meters are drawn only when standard error is a terminal; final summary
+lines are printed when output is redirected.
+.SH ENVIRONMENT
+.TP
+.B CGC_DEFAULT_HOST
+Default host used for the
+.IR owner/repo
+shorthand when
+.B \-\-host
+is not given.
+.SH "EXIT STATUS"
+.TP
+.B 0
+The repository was cloned successfully.
+.TP
+.B 1
+A network, protocol, filesystem, or checkout error occurred.
+.TP
+.B 2
+The command line was invalid.
+.SH LIMITATIONS
+No SSH, \fBgit://\fR, or local-path transports; no authentication, so private
+repositories are not supported; protocol v2 and SHA-1 only; the whole pack and
+all inflated objects are held in memory; no shallow or partial clone, LFS,
+hooks, or reflogs.
+.SH "SEE ALSO"
+.BR git-clone (1),
+.BR git-upload-pack (1),
+.BR gitprotocol-v2 (5),
+.BR git (1)

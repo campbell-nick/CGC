@@ -13,14 +13,17 @@ make
 ./cgc --help
 ```
 
-Install with `sudo make install` (defaults to `/usr/local/bin/cgc`). Set
-`PREFIX` to install elsewhere, or `DESTDIR` to stage a package install:
+Install with `sudo make install` (defaults to `/usr/local/bin/cgc` and
+`/usr/local/share/man/man1/cgc.1`). Set `PREFIX` to install elsewhere, or
+`DESTDIR` to stage a package install:
 
 ```sh
 make install PREFIX="$HOME/.local"
 make install DESTDIR=/tmp/pkgroot
 make uninstall
 ```
+
+After installing, `man cgc` shows the manual page.
 
 ## Tests
 
