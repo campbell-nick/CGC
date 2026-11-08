@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Tiny smart-HTTP server backed by `git http-backend`, used by smoke.sh.
+
+usage: serve-http.py <git-project-root> <port>
+"""
+import os
+import subprocess
+import sys
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+ROOT = os.path.abspath(sys.argv[1])
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def _run(self):
+        u = urllib.parse.urlparse(self.path)
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        env = os.environ.copy()
+        env.update({
+            "GIT_PROJECT_ROOT": ROOT,
+            "GIT_HTTP_EXPORT_ALL": "1",
+            "REQUEST_METHOD": self.command,
+            "PATH_INFO": u.path,
+            "QUERY_STRING": u.query,
+            "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+            "CONTENT_LENGTH": str(length),
+            "REMOTE_ADDR": self.client_address[0],
+            "SERVER_PROTOCOL": self.protocol_version,
+            "GATEWAY_INTERFACE": "CGI/1.1",
+            "HTTP_GIT_PROTOCOL": self.headers.get("Git-Protocol", ""),
+        })
+        p = subprocess.run(["git", "http-backend"], input=body, env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out = p.stdout
+        idx = out.find(b"\r\n\r\n")
+        sep = 4
+        if idx < 0:
+            idx = out.find(b"\n\n")
+            sep = 2
+        if idx < 0:
+            self.send_response(500)
+            self.send_header("Content-Length", str(len(out) + len(p.stderr)))
+            self.end_headers()
+            self.wfile.write(out + p.stderr)
+            return
+
+        status = 200
+        headers = []
+        for line in out[:idx].decode("latin1").splitlines():
+            if line.lower().startswith("status:"):
+                status = int(line.split(None, 2)[1])
+            elif ":" in line:
+                k, v = line.split(":", 1)
+                headers.append((k.strip(), v.strip()))
+
+        payload = out[idx + sep:]
+        self.send_response(status)
+        for k, v in headers:
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    do_GET = _run
+    do_POST = _run
+
+    def log_message(self, *args):
+        pass
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        sys.exit("usage: serve-http.py <git-project-root> <port>")
+    ThreadingHTTPServer(("127.0.0.1", int(sys.argv[2])), Handler).serve_forever()
