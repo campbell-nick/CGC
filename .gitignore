@@ -1,2 +1,5 @@
 /cgc
 src/*.o
+/tests/unit
+/tests/packtest
+/dist/

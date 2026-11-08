@@ -117,6 +117,16 @@ A network, protocol, filesystem, or checkout error occurred.
 .TP
 .B 2
 The command line was invalid.
+.SH SAFETY
+The remote repository is treated as untrusted. Ref names and
+.B HEAD
+targets supplied by the server are validated before use, configuration values
+are rejected if they contain control characters, and checkout refuses duplicate
+paths, file/directory collisions, and paths whose existing parent is a symlink.
+This prevents a malicious repository from writing outside the target directory.
+These checks are not a sandbox: as with
+.BR git-clone (1),
+do not run code from an untrusted repository without reviewing it.
 .SH LIMITATIONS
 No SSH, \fBgit://\fR, or local-path transports; no authentication, so private
 repositories are not supported; protocol v2 and SHA-1 only; the whole pack and

@@ -9,6 +9,9 @@
 - Nested trees, symlinks, executable files
 - Empty repositories (creates `.git` with the advertised default branch)
 - A Git-compatible index: `git status` and `git log` work immediately
+- Validation of server-supplied ref names, `HEAD` targets, and config values
+- Checkout that rejects duplicate paths, file/directory collisions, and
+  symlinked parent directories
 
 ## Limitations (v1)
 

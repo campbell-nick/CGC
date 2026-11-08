@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Tiny smart-HTTP server backed by `git http-backend`, used by smoke.sh.
 
-usage: serve-http.py <git-project-root> <port>
+usage: serve-http.py <git-project-root> <port> [length|chunked]
+
+The optional third argument selects how response bodies are framed. The
+default is Content-Length; "chunked" exercises cgc's chunked decoder.
 """
 import os
 import subprocess
@@ -10,10 +13,26 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.abspath(sys.argv[1])
+MODE = sys.argv[3] if len(sys.argv) > 3 else "length"
 
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+
+    def _send_body(self, payload):
+        if MODE == "chunked":
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for start in range(0, len(payload), 1024):
+                chunk = payload[start:start + 1024]
+                self.wfile.write(("%x\r\n" % len(chunk)).encode("ascii"))
+                self.wfile.write(chunk)
+                self.wfile.write(b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        else:
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
     def _run(self):
         u = urllib.parse.urlparse(self.path)
@@ -61,9 +80,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         for k, v in headers:
             self.send_header(k, v)
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        self._send_body(payload)
 
     do_GET = _run
     do_POST = _run
@@ -73,6 +90,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        sys.exit("usage: serve-http.py <git-project-root> <port>")
+    if len(sys.argv) not in (3, 4):
+        sys.exit("usage: serve-http.py <git-project-root> <port> "
+                 "[length|chunked]")
+    if MODE not in ("length", "chunked"):
+        sys.exit("serve-http.py: mode must be length or chunked")
     ThreadingHTTPServer(("127.0.0.1", int(sys.argv[2])), Handler).serve_forever()

@@ -105,38 +105,33 @@ static int parse_ref_line(const unsigned char *line, size_t len, Ref *ref)
     int unborn = 0;
     char *save = NULL;
     char *tok = strtok_r(s, " ", &save);
-    if (!tok) {
-        free(s);
-        return -1;
-    }
+    if (!tok)
+        goto fail;
 
     if (strcmp(tok, "unborn") == 0) {
         unborn = 1;
         tok = strtok_r(NULL, " ", &save);
-        if (!tok) {
-            free(s);
-            return -1;
-        }
+        if (!tok)
+            goto fail;
     } else {
-        if (oid_parse(tok, ref->oid) != 0) {
-            free(s);
-            return -1;
-        }
+        if (oid_parse(tok, ref->oid) != 0)
+            goto fail;
         tok = strtok_r(NULL, " ", &save);
-        if (!tok) {
-            free(s);
-            return -1;
-        }
+        if (!tok)
+            goto fail;
     }
 
     ref->name = xstrdup(tok);
-    if (!unborn && ref->name[0] == 0) {
-        free(s);
-        return -1;
-    }
+    if (ref->name[0] == 0)
+        goto fail;
+    if (strcmp(ref->name, "HEAD") != 0 && !ref_name_is_valid(ref->name))
+        goto fail;
 
     while ((tok = strtok_r(NULL, " ", &save)) != NULL) {
         if (strncmp(tok, "symref-target:", 14) == 0) {
+            if (!ref_name_is_valid(tok + 14))
+                goto fail;
+            free(ref->symref);
             ref->symref = xstrdup(tok + 14);
         } else if (strncmp(tok, "peeled:", 7) == 0) {
             if (oid_parse(tok + 7, ref->peeled) == 0)
@@ -146,6 +141,14 @@ static int parse_ref_line(const unsigned char *line, size_t len, Ref *ref)
 
     free(s);
     return unborn ? 1 : 0;
+
+fail:
+    free(s);
+    free(ref->name);
+    free(ref->symref);
+    ref->name = NULL;
+    ref->symref = NULL;
+    return -1;
 }
 
 static int post_command(const char *url, const char *endpoint_path,

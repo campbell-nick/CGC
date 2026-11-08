@@ -20,10 +20,69 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y zlib1g-dev libssl-dev
+          sudo apt-get install -y zlib1g-dev libssl-dev pkg-config
 
-      - name: Build (warnings are errors)
-        run: make CC=${{ matrix.cc }} CFLAGS="-O2 -g -Werror"
+      - name: Build, unit test, and smoke test
+        run: |
+          make CC=${{ matrix.cc }} CFLAGS="-O2 -g -Werror" \
+               check test
 
-      - name: Run smoke test
-        run: make test CC=${{ matrix.cc }}
+  sanitizers:
+    name: ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev libssl-dev pkg-config clang
+
+      - name: Build and test with sanitizers
+        env:
+          CC: clang
+          CFLAGS: -O1 -g -Werror -fsanitize=address,undefined -fno-omit-frame-pointer
+          LDFLAGS: -fsanitize=address,undefined
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: make check test
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: brew install openssl@3 pkg-config
+
+      - name: Build, unit test, and smoke test
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig"
+          make CFLAGS="-O2 -g -Werror" check test
+
+  dist:
+    name: release tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev libssl-dev pkg-config
+
+      - name: Build release tarball
+        run: make dist
+
+      - name: Build and test from the tarball
+        run: |
+          mkdir -p /tmp/cgc-dist
+          tar -xzf dist/cgc-*.tar.gz -C /tmp/cgc-dist
+          cd /tmp/cgc-dist/cgc-*
+          make CFLAGS="-O2 -g -Werror" check test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cgc-dist
+          path: dist/cgc-*.tar.gz

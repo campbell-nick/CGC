@@ -8,6 +8,10 @@
 int url_parse(const char *url, Url *out)
 {
     memset(out, 0, sizeof(*out));
+    for (const char *q = url; *q; q++) {
+        if ((unsigned char)*q < 0x20 || *q == 0x7f)
+            return -1;
+    }
     const char *p = strstr(url, "://");
     if (!p)
         return -1;

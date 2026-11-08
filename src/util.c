@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -399,6 +400,72 @@ char *path_join(const char *a, const char *b)
         buf_putc(&out, '/');
     buf_append(&out, b, strlen(b));
     return (char *)out.data;
+}
+
+int ref_name_is_valid(const char *name)
+{
+    if (!name || strncmp(name, "refs/", 5) != 0)
+        return 0;
+    if (name[5] == 0)
+        return 0;
+    size_t total = strlen(name);
+    if (name[total - 1] == '/' || name[total - 1] == '.')
+        return 0;
+
+    for (const char *p = name; *p;) {
+        const char *slash = strchr(p, '/');
+        size_t len = slash ? (size_t)(slash - p) : strlen(p);
+
+        if (len == 0 || p[0] == '.' || p[len - 1] == '.')
+            return 0;
+        if (len >= 5 && memcmp(p + len - 5, ".lock", 5) == 0)
+            return 0;
+
+        for (size_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)p[i];
+            if (c < 0x20 || c == 0x7f || c == ' ' || c == '~' ||
+                c == '^' || c == ':' || c == '?' || c == '*' ||
+                c == '[' || c == '\\')
+                return 0;
+        }
+        if (!slash)
+            break;
+        p = slash + 1;
+    }
+
+    if (strstr(name, "..") || strstr(name, "@{"))
+        return 0;
+    return 1;
+}
+
+int path_is_safe_relative(const char *path)
+{
+    if (!path || !*path || path[0] == '/' || path[0] == '\\')
+        return 0;
+
+    const char *p = path;
+    for (;;) {
+        const char *slash = strchr(p, '/');
+        size_t len = slash ? (size_t)(slash - p) : strlen(p);
+
+        if (len == 0)
+            return 0;
+        if ((len == 1 && p[0] == '.') ||
+            (len == 2 && p[0] == '.' && p[1] == '.') ||
+            (len == 4 && strncasecmp(p, ".git", 4) == 0))
+            return 0;
+
+        for (size_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)p[i];
+            if (c < 0x20 || c == 0x7f || c == '\\')
+                return 0;
+        }
+
+        if (!slash)
+            break;
+        p = slash + 1;
+    }
+    return 1;
 }
 
 int zlib_inflate(const unsigned char *in, size_t inlen, size_t expected,

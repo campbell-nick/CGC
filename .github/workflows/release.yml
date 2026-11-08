@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev libssl-dev pkg-config
+
+      - name: Check tag matches VERSION
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(cat VERSION)"
+          if [ "$tag" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match VERSION ($version)" >&2
+            exit 1
+          fi
+
+      - name: Build and test
+        run: make CFLAGS="-O2 -g -Werror" check test
+
+      - name: Build release tarball
+        run: make dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/cgc-$(cat VERSION).tar.gz" \
+            --title "cgc $(cat VERSION)" \
+            --generate-notes

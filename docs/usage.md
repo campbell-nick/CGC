@@ -50,6 +50,19 @@ download meter, `Resolving deltas`, and `Updating files` during checkout. Live
 meters are drawn on a terminal; a final summary line is printed when output is
 redirected. `--quiet` suppresses all of it.
 
+## Safety
+
+`cgc` treats the remote repository as untrusted. Server-provided ref names and
+`HEAD` targets are validated before they are written to disk, values written to
+`.git/config` are rejected if they contain control characters, and checkout
+refuses trees with duplicate paths, file/directory collisions, or paths whose
+existing parent is a symlink. This prevents a malicious repository from
+escaping the target directory or injecting configuration.
+
+These checks protect the clone destination; they are not a sandbox. As with
+`git clone`, do not run code from an untrusted repository, and review hooks and
+build scripts before executing them.
+
 ## Verifying a clone
 
 ```sh

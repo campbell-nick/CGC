@@ -4,6 +4,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int text_is_safe(const char *s)
+{
+    if (!s)
+        return 1;
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c < 0x20 || c == 0x7f)
+            return 0;
+    }
+    return 1;
+}
+
 int repo_init(const char *gitdir)
 {
     const char *dirs[] = {
@@ -41,6 +53,8 @@ int repo_init(const char *gitdir)
 static void write_ref_file(const char *gitdir, const char *name,
                            const unsigned char oid[OID_RAW])
 {
+    if (!ref_name_is_valid(name))
+        return;
     char hex[OID_HEX + 1];
     oid_hex(oid, hex);
 
@@ -59,6 +73,8 @@ static void write_ref_file(const char *gitdir, const char *name,
 static void write_symref_file(const char *gitdir, const char *name,
                               const char *target)
 {
+    if (!ref_name_is_valid(name) || !ref_name_is_valid(target))
+        return;
     char *path = path_join(gitdir, name);
     char *dir = path_dirname(path);
     if (mkdir_p(dir, 0777) == 0) {
@@ -113,6 +129,8 @@ int repo_write_refs(const char *gitdir, const RemoteRefs *refs)
 
 int repo_set_head(const char *gitdir, const char *default_ref)
 {
+    if (!ref_name_is_valid(default_ref))
+        return -1;
     char *path = path_join(gitdir, "HEAD");
     Buf b;
     buf_init(&b);
@@ -126,6 +144,9 @@ int repo_set_head(const char *gitdir, const char *default_ref)
 int repo_write_config(const char *gitdir, const char *url,
                       const char *default_ref)
 {
+    if (!text_is_safe(url) || !text_is_safe(default_ref))
+        return -1;
+
     Buf b;
     buf_init(&b);
     buf_appendf(&b,

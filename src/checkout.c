@@ -10,6 +10,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#define ST_CTIM(st) ((st)->st_ctimespec)
+#define ST_MTIM(st) ((st)->st_mtimespec)
+#else
+#define ST_CTIM(st) ((st)->st_ctim)
+#define ST_MTIM(st) ((st)->st_mtim)
+#endif
+
 typedef struct {
     char *path;
     unsigned char oid[OID_RAW];
@@ -45,6 +53,70 @@ static int cmp_entry(const void *a, const void *b)
     return strcmp(ea->path, eb->path);
 }
 
+/* Reject duplicate paths and file/directory collisions (for example a symlink
+ * "a" combined with a file "a/b"), which could otherwise redirect a write
+ * outside the working tree. */
+static int validate_index(Index *idx)
+{
+    qsort(idx->entries, idx->count, sizeof(IndexEntry), cmp_entry);
+
+    for (size_t i = 0; i < idx->count; i++) {
+        if (!path_is_safe_relative(idx->entries[i].path)) {
+            warn_cgc("unsafe tree: invalid path '%s'",
+                     idx->entries[i].path);
+            return -1;
+        }
+    }
+
+    for (size_t i = 1; i < idx->count; i++) {
+        const char *prev = idx->entries[i - 1].path;
+        const char *cur = idx->entries[i].path;
+        size_t plen = strlen(prev);
+
+        if (strcmp(prev, cur) == 0 ||
+            (strncmp(cur, prev, plen) == 0 && cur[plen] == '/')) {
+            warn_cgc("unsafe tree: path collision at '%s'", cur);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Verify that every existing parent component of rel is a real directory, not
+ * a symlink or regular file. Missing components are left for mkdir_p. */
+static int ensure_parents(const char *worktree, const char *rel)
+{
+    char *tmp = xstrdup(rel);
+    int rc = 0;
+
+    for (char *p = tmp; (p = strchr(p, '/')) != NULL; p++) {
+        *p = 0;
+        char *path = path_join(worktree, tmp);
+        struct stat st;
+        int missing = 0;
+
+        if (lstat(path, &st) == 0) {
+            if (!S_ISDIR(st.st_mode)) {
+                warn_cgc("unsafe tree: refusing to write through '%s'", tmp);
+                rc = -1;
+            }
+        } else if (errno == ENOENT) {
+            missing = 1;
+        } else {
+            warn_cgc("cannot inspect '%s': %s", tmp, strerror(errno));
+            rc = -1;
+        }
+
+        free(path);
+        *p = '/';
+        if (rc != 0 || missing)
+            break;
+    }
+
+    free(tmp);
+    return rc;
+}
+
 static void index_write(const char *gitdir, Index *idx)
 {
     qsort(idx->entries, idx->count, sizeof(IndexEntry), cmp_entry);
@@ -60,10 +132,10 @@ static void index_write(const char *gitdir, Index *idx)
         const struct stat *st = &e->st;
         uint32_t zero = 0;
 
-        put_be32(&b, e->has_stat ? (uint32_t)st->st_ctim.tv_sec : zero);
-        put_be32(&b, e->has_stat ? (uint32_t)st->st_ctim.tv_nsec : zero);
-        put_be32(&b, e->has_stat ? (uint32_t)st->st_mtim.tv_sec : zero);
-        put_be32(&b, e->has_stat ? (uint32_t)st->st_mtim.tv_nsec : zero);
+        put_be32(&b, e->has_stat ? (uint32_t)ST_CTIM(st).tv_sec : zero);
+        put_be32(&b, e->has_stat ? (uint32_t)ST_CTIM(st).tv_nsec : zero);
+        put_be32(&b, e->has_stat ? (uint32_t)ST_MTIM(st).tv_sec : zero);
+        put_be32(&b, e->has_stat ? (uint32_t)ST_MTIM(st).tv_nsec : zero);
         put_be32(&b, e->has_stat ? (uint32_t)st->st_dev : zero);
         put_be32(&b, e->has_stat ? (uint32_t)st->st_ino : zero);
         put_be32(&b, e->mode);
@@ -113,11 +185,7 @@ static int parse_mode(const unsigned char *s, size_t len, unsigned *mode)
 
 static int valid_name(const char *name)
 {
-    if (!*name || strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-        return 0;
-    if (strchr(name, '/') || strchr(name, '\\'))
-        return 0;
-    return 1;
+    return path_is_safe_relative(name) && strchr(name, '/') == NULL;
 }
 
 static char *join_rel(const char *prefix, const char *name)
@@ -241,10 +309,28 @@ static int materialize(const char *gitdir, const char *worktree, Index *idx)
 
     for (size_t i = 0; i < idx->count; i++) {
         IndexEntry *e = &idx->entries[i];
+        if (ensure_parents(worktree, e->path) != 0) {
+            progress_clear();
+            return -1;
+        }
+
         char *path = path_join(worktree, e->path);
+        struct stat st;
+        int exists = lstat(path, &st) == 0;
 
         if (e->mode == 0160000) {
-            if (mkdir_p(path, 0777) != 0) {
+            if (exists && !S_ISDIR(st.st_mode)) {
+                if (unlink(path) != 0) {
+                    warn_cgc("cannot replace '%s': %s", e->path,
+                             strerror(errno));
+                    free(path);
+                    progress_clear();
+                    return -1;
+                }
+                exists = 0;
+            }
+            if (!exists && mkdir_p(path, 0777) != 0) {
+                warn_cgc("cannot create '%s': %s", e->path, strerror(errno));
                 free(path);
                 progress_clear();
                 return -1;
@@ -254,8 +340,27 @@ static int materialize(const char *gitdir, const char *worktree, Index *idx)
             continue;
         }
 
+        if (exists) {
+            if (S_ISDIR(st.st_mode)) {
+                warn_cgc("cannot replace directory '%s' with a file",
+                         e->path);
+                free(path);
+                progress_clear();
+                return -1;
+            }
+            if (unlink(path) != 0) {
+                warn_cgc("cannot replace '%s': %s", e->path,
+                         strerror(errno));
+                free(path);
+                progress_clear();
+                return -1;
+            }
+        }
+
         char *dir = path_dirname(path);
         if (mkdir_p(dir, 0777) != 0) {
+            warn_cgc("cannot create directory for '%s': %s", e->path,
+                     strerror(errno));
             free(dir);
             free(path);
             progress_clear();
@@ -328,6 +433,8 @@ int checkout_commit(const char *gitdir, const char *worktree,
     Index idx;
     memset(&idx, 0, sizeof(idx));
     int rc = collect_tree(gitdir, tree_copy, "", &idx);
+    if (rc == 0)
+        rc = validate_index(&idx);
     if (rc == 0)
         rc = materialize(gitdir, worktree, &idx);
     if (rc == 0)

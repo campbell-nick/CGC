@@ -5,7 +5,11 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#define CGC_VERSION "0.1.0"
+#define CGC_VERSION_STRING "dev"
+
+#ifndef CGC_VERSION
+#define CGC_VERSION CGC_VERSION_STRING
+#endif
 #define OID_RAW 20
 #define OID_HEX 40
 
@@ -52,6 +56,14 @@ int read_file(const char *path, Buf *out);
 int is_dir_empty(const char *path, int *exists);
 char *path_join(const char *a, const char *b);
 char *path_dirname(const char *path);
+
+/* Check a full ref name (e.g. refs/heads/main) against Git's rules. */
+int ref_name_is_valid(const char *name);
+
+/* Check a repository-relative path: no absolute paths, no empty, "." or ".."
+ * components, no ".git" component (case-insensitive), no backslashes or
+ * control characters. */
+int path_is_safe_relative(const char *path);
 
 /* zlib helpers. `consumed` may be NULL. */
 int zlib_inflate(const unsigned char *in, size_t inlen, size_t expected,
