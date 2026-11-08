@@ -1,5 +1,9 @@
 # cgc — `git clone` from scratch, in C
 
+<p align="center">
+  <img src="logo.svg" alt="cgc logo" width="128" height="128">
+</p>
+
 [![CI](https://github.com/campbell-nick/cgc/actions/workflows/ci.yml/badge.svg)](https://github.com/campbell-nick/cgc/actions/workflows/ci.yml)
 
 `cgc` is a self-contained implementation of `git clone` over the Git smart
