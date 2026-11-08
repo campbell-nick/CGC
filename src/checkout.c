@@ -1,3 +1,8 @@
+#if defined(__APPLE__)
+#undef _POSIX_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
+
 #include "checkout.h"
 #include "odb.h"
 #include "progress.h"
@@ -10,8 +15,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#define ST_CTIM(st) ((st)->st_ctimespec)
+#define ST_MTIM(st) ((st)->st_mtimespec)
+#else
 #define ST_CTIM(st) ((st)->st_ctim)
 #define ST_MTIM(st) ((st)->st_mtim)
+#endif
 
 typedef struct {
     char *path;
