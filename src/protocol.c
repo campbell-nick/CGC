@@ -379,7 +379,7 @@ static int fetch_feed(void *ud, const void *data, size_t len)
     buf_append(&d->pending, data, len);
 
     size_t pos = 0;
-    while (!d->done && d->pending.len - pos >= 4) {
+    while (!d->done && !cgc_interrupted && d->pending.len - pos >= 4) {
         const unsigned char *p = d->pending.data + pos;
         int v = 0;
         int ok = 1;
@@ -426,6 +426,8 @@ static int fetch_feed(void *ud, const void *data, size_t len)
     }
 
     buf_consume(&d->pending, pos);
+    if (cgc_interrupted)
+        return -1;
     return d->failed ? -1 : 0;
 }
 

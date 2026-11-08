@@ -220,6 +220,10 @@ static int collect_tree(const char *gitdir, const unsigned char tree_oid[OID_RAW
 
     size_t pos = 0;
     while (pos < tree.len) {
+        if (cgc_interrupted) {
+            buf_free(&tree);
+            return -1;
+        }
         size_t space = pos;
         while (space < tree.len && tree.data[space] != ' ')
             space++;
@@ -313,6 +317,10 @@ static int materialize(const char *gitdir, const char *worktree, Index *idx)
     progress_checkout_begin(idx->count);
 
     for (size_t i = 0; i < idx->count; i++) {
+        if (cgc_interrupted) {
+            progress_clear();
+            return -1;
+        }
         IndexEntry *e = &idx->entries[i];
         if (ensure_parents(worktree, e->path) != 0) {
             progress_clear();

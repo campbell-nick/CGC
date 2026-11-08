@@ -1,6 +1,7 @@
 #ifndef CGC_UTIL_H
 #define CGC_UTIL_H
 
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -14,6 +15,7 @@
 #define OID_HEX 40
 
 extern int cgc_quiet;
+extern volatile sig_atomic_t cgc_interrupted;
 
 typedef struct {
     unsigned char *data;

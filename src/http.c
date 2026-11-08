@@ -1,5 +1,6 @@
 #include "http.h"
 #include "url.h"
+#include "util.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -134,12 +135,17 @@ static ssize_t conn_read(Conn *c, void *buf, size_t len)
             return 0;
         if (err == SSL_ERROR_SYSCALL && errno == 0)
             return 0;
+        if (cgc_interrupted)
+            return -1;
         return -1;
     }
     for (;;) {
         ssize_t n = read(c->fd, buf, len);
-        if (n < 0 && errno == EINTR)
+        if (n < 0 && errno == EINTR) {
+            if (cgc_interrupted)
+                return -1;
             continue;
+        }
         return n;
     }
 }
@@ -156,8 +162,11 @@ static int conn_write_all(Conn *c, const void *data, size_t len)
         } else {
             ssize_t w = write(c->fd, p, len);
             if (w < 0) {
-                if (errno == EINTR)
+                if (errno == EINTR) {
+                    if (cgc_interrupted)
+                        return -1;
                     continue;
+                }
                 return -1;
             }
             n = (int)w;

@@ -15,6 +15,7 @@
 #include <zlib.h>
 
 int cgc_quiet = 0;
+volatile sig_atomic_t cgc_interrupted = 0;
 
 void buf_init(Buf *b)
 {

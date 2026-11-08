@@ -4,11 +4,14 @@
 #include "url.h"
 #include "util.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static void usage(FILE *out)
 {
@@ -33,8 +36,60 @@ static void usage(FILE *out)
             "  -V, --version   show version\n");
 }
 
+static char *cleanup_path = NULL;
+static int cleanup_enabled = 0;
+static int cleanup_created = 0;
+
+static void remove_tree(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0)
+        return;
+    if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
+        DIR *d = opendir(path);
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d)) != NULL) {
+                if (strcmp(de->d_name, ".") == 0 ||
+                    strcmp(de->d_name, "..") == 0)
+                    continue;
+                char *child = path_join(path, de->d_name);
+                remove_tree(child);
+                free(child);
+            }
+            closedir(d);
+        }
+        rmdir(path);
+    } else {
+        unlink(path);
+    }
+}
+
+static void cleanup_atexit(void)
+{
+    if (cleanup_enabled && cleanup_path && cleanup_created)
+        remove_tree(cleanup_path);
+    free(cleanup_path);
+    cleanup_path = NULL;
+}
+
+static void on_signal(int sig)
+{
+    (void)sig;
+    cgc_interrupted = 1;
+}
+
 int main(int argc, char **argv)
 {
+    atexit(cleanup_atexit);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    /* No SA_RESTART: interrupted syscalls should return EINTR. */
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
 
     const char *host = getenv("CGC_DEFAULT_HOST");
@@ -96,6 +151,10 @@ int main(int argc, char **argv)
     if (!exists && mkdir_p(dest, 0777) != 0)
         die("cannot create destination '%s': %s", dest, strerror(errno));
 
+    cleanup_created = !exists;
+    cleanup_path = xstrdup(dest);
+    cleanup_enabled = 1;
+
     if (!quiet)
         fprintf(stderr, "Cloning into '%s'...\n", dest);
 
@@ -137,5 +196,7 @@ int main(int argc, char **argv)
     free(gitdir);
     free(url);
     free(derived_name);
+
+    cleanup_enabled = 0;
     return 0;
 }

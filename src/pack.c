@@ -249,7 +249,7 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir,
 
     size_t unresolved = count;
     uint32_t delta_done = 0;
-    for (uint32_t pass = 0; unresolved > 0 && pass <= count; pass++) {
+    for (uint32_t pass = 0; unresolved > 0 && !cgc_interrupted && pass <= count; pass++) {
         size_t progressed = 0;
 
         for (uint32_t i = 0; i < count; i++) {
@@ -335,6 +335,8 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir,
             break;
     }
 
+    if (cgc_interrupted)
+        goto fail;
     if (unresolved) {
         warn_cgc("could not resolve %zu delta object(s)", unresolved);
         goto fail;
