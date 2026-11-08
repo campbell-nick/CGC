@@ -18,7 +18,7 @@
 ## Limitations (v1)
 
 - No SSH, `git://` or local-path transports.
-- No authentication, so private repositories are not supported yet.
+- HTTPS bearer-token authentication is supported (`--token`, `CGC_TOKEN`, `GIT_TOKEN`); SSH keys and other credential helpers are not.
 - Protocol v2 only; servers that only speak protocol v0/v1 are rejected.
 - SHA-1 repositories only (SHA-256 object format is detected and rejected).
 - The whole pack and all inflated objects are held in memory. Small and medium

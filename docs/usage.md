@@ -37,6 +37,7 @@ CGC_DEFAULT_HOST=git.example.com cgc team/repo
 
 ```
 --host <host>   default host for owner/repo shorthand
+--token <tok>   bearer token for HTTPS authentication (env CGC_TOKEN/GIT_TOKEN)
 -b, --branch <name>
                 check out <name> (branch or tag) instead of the remote's
                 default branch; tags are checked out in detached HEAD state

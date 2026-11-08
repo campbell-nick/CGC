@@ -24,6 +24,14 @@ void http_response_free(HttpResponse *r)
     memset(r, 0, sizeof(*r));
 }
 
+static char *g_http_token = NULL;
+
+void http_set_token(const char *token)
+{
+    free(g_http_token);
+    g_http_token = token && *token ? xstrdup(token) : NULL;
+}
+
 static int tcp_connect(const char *host, int port)
 {
     char portstr[16];
@@ -421,6 +429,9 @@ static int request_once(const char *method, const char *url,
     buf_append(&req, "Accept: */*\r\n", strlen("Accept: */*\r\n"));
     buf_append(&req, "Accept-Encoding: identity\r\n", strlen("Accept-Encoding: identity\r\n"));
     buf_append(&req, "Connection: close\r\n", strlen("Connection: close\r\n"));
+    if (g_http_token) {
+        buf_appendf(&req, "Authorization: Bearer %s\r\n", g_http_token);
+    }
     if (extra_headers) {
         buf_append(&req, extra_headers, strlen(extra_headers));
         if (req.len >= 2 && !(req.data[req.len - 2] == '\r' && req.data[req.len - 1] == '\n'))

@@ -14,6 +14,9 @@ typedef struct {
 
 void http_response_free(HttpResponse *r);
 
+/* Set a bearer token used for all subsequent requests (or NULL to clear). */
+void http_set_token(const char *token);
+
 /* Receives decoded body chunks as they arrive. Return 0 to continue. */
 typedef int (*http_body_fn)(void *ud, const void *data, size_t len);
 

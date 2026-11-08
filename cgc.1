@@ -64,6 +64,16 @@ as the default host for the
 .IR owner/repo
 shorthand.
 .TP
+.B \-\-token \fItok\fR
+Use
+.I tok
+as a bearer token for HTTPS authentication. May also be given via the
+.B CGC_TOKEN
+or
+.B GIT_TOKEN
+environment variables. Tokens are never written to
+.BR .git/config .
+.TP
 .BR \-b ", " \-\-branch " \fIname\fR"
 Check out
 .I name

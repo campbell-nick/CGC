@@ -1,4 +1,5 @@
 #include "checkout.h"
+#include "http.h"
 #include "protocol.h"
 #include "repo.h"
 #include "url.h"
@@ -31,6 +32,7 @@ static void usage(FILE *out)
             "\n"
             "options:\n"
             "  --host <host>   default host for owner/repo (env CGC_DEFAULT_HOST)\n"
+            "  --token <tok>   bearer token for HTTPS auth (env CGC_TOKEN/GIT_TOKEN)\n"
             "  -b, --branch <name>\n"
             "                 checkout <name> instead of the remote's default branch\n"
             "  --depth <n>     create a shallow clone with history truncated to n commits\n"
@@ -102,6 +104,10 @@ int main(int argc, char **argv)
     if (!host || !*host)
         host = "github.com";
 
+    const char *token = getenv("CGC_TOKEN");
+    if (!token || !*token)
+        token = getenv("GIT_TOKEN");
+
     int quiet = 0;
     const char *branch = NULL;
     int depth = 0;
@@ -124,6 +130,10 @@ int main(int argc, char **argv)
             if (i + 1 >= argc)
                 die("--host requires an argument");
             host = argv[++i];
+        } else if (strcmp(a, "--token") == 0) {
+            if (i + 1 >= argc)
+                die("--token requires an argument");
+            token = argv[++i];
         } else if (strcmp(a, "-b") == 0 || strcmp(a, "--branch") == 0) {
             if (i + 1 >= argc)
                 die("--branch requires an argument");
@@ -160,9 +170,27 @@ int main(int argc, char **argv)
 
     cgc_quiet = quiet;
 
+    http_set_token(token);
+
     char *url;
     char *derived_name;
     url_resolve(positional[0], host, &url, &derived_name);
+
+    /* Strip any embedded credentials from the URL so they are not persisted
+     * in .git/config. Use --token / CGC_TOKEN / GIT_TOKEN for auth. */
+    {
+        char *p = strstr(url, "://");
+        if (p) {
+            p += 3;
+            char *at = strchr(p, '@');
+            char *slash = strchr(p, '/');
+            if (at && (!slash || at < slash)) {
+                size_t prefix = (size_t)(p - url);
+                size_t rest = strlen(at + 1);
+                memmove(url + prefix, at + 1, rest + 1);
+            }
+        }
+    }
 
     const char *dest = npos >= 2 ? positional[1] : derived_name;
 
