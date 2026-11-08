@@ -13,10 +13,13 @@ cgc: $(OBJ)
 %.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
+test: cgc
+	./tests/smoke.sh
+
 clean:
 	rm -f $(OBJ) cgc
 
 install: cgc
 	install -m 755 cgc /usr/local/bin/cgc
 
-.PHONY: clean install
+.PHONY: clean install test

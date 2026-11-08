@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: build and test (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev libssl-dev
+
+      - name: Build (warnings are errors)
+        run: make CC=${{ matrix.cc }} CFLAGS="-O2 -g -Werror"
+
+      - name: Run smoke test
+        run: make test CC=${{ matrix.cc }}

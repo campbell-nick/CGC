@@ -1,5 +1,7 @@
 # cgc — `git clone` from scratch, in C
 
+[![CI](https://github.com/campbell-nick/cgc/actions/workflows/ci.yml/badge.svg)](https://github.com/campbell-nick/cgc/actions/workflows/ci.yml)
+
 `cgc` is a self-contained implementation of `git clone` over the Git smart
 HTTP protocol (version 2). It does **not** shell out to `git`; it speaks the
 protocol itself, validates and unpacks the packfile, resolves deltas, writes
@@ -28,12 +30,15 @@ Install with `sudo make install` (installs to `/usr/local/bin/cgc`).
 ## Tests
 
 ```sh
-./tests/smoke.sh
+make test          # runs tests/smoke.sh
 ```
 
 The smoke test generates a repository with history, deltas, a tag, a symlink
 and an executable, serves it with `git http-backend`, clones it with `cgc`, and
 then verifies the result with `git fsck`, `git status`, and ref comparisons.
+
+CI runs the same test on every push and pull request with both GCC and Clang,
+building with `-Werror`.
 
 ## Usage
 
