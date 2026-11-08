@@ -75,7 +75,16 @@ Create a shallow clone with history truncated to
 .I n
 commits. Writes
 .B .git/shallow
-with the shallow boundary.
+with the shallow boundary. Implies
+.BR \-\-single\-branch .
+.TP
+.B \-\-single\-branch
+Clone only the history of one branch.
+.TP
+.B \-\-no\-single\-branch
+Fetch all branches (the default unless
+.B \-\-depth
+is given).
 .TP
 .BR \-q ", " \-\-quiet
 Suppress progress messages and status output.

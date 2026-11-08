@@ -41,6 +41,9 @@ CGC_DEFAULT_HOST=git.example.com cgc team/repo
                 check out <name> (branch or tag) instead of the remote's
                 default branch; tags are checked out in detached HEAD state
 --depth <n>     create a shallow clone with history truncated to n commits
+--single-branch clone only the history of one branch
+--no-single-branch
+                fetch all branches (default unless --depth is given)
 -q, --quiet     suppress progress messages
 -h, --help      show help
 -V, --version   show version

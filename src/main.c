@@ -34,6 +34,9 @@ static void usage(FILE *out)
             "  -b, --branch <name>\n"
             "                 checkout <name> instead of the remote's default branch\n"
             "  --depth <n>     create a shallow clone with history truncated to n commits\n"
+            "  --single-branch clone only the history of one branch\n"
+            "  --no-single-branch\n"
+            "                 fetch all branches (default unless --depth is given)\n"
             "  -q, --quiet     suppress progress messages\n"
             "  -h, --help      show this help\n"
             "  -V, --version   show version\n");
@@ -102,6 +105,8 @@ int main(int argc, char **argv)
     int quiet = 0;
     const char *branch = NULL;
     int depth = 0;
+    int single_branch = 0;
+    int no_single_branch = 0;
     const char *positional[3];
     int npos = 0;
 
@@ -129,6 +134,10 @@ int main(int argc, char **argv)
             depth = atoi(argv[++i]);
             if (depth <= 0)
                 die("--depth must be a positive integer");
+        } else if (strcmp(a, "--single-branch") == 0) {
+            single_branch = 1;
+        } else if (strcmp(a, "--no-single-branch") == 0) {
+            no_single_branch = 1;
         } else if (strcmp(a, "--") == 0) {
             for (i++; i < argc; i++) {
                 if (npos >= 2)
@@ -177,10 +186,46 @@ int main(int argc, char **argv)
     if (repo_init(gitdir) != 0)
         die("cannot initialise repository in '%s'", gitdir);
 
+    if (no_single_branch)
+        single_branch = 0;
+    else if (depth > 0)
+        single_branch = 1;
+
     RemoteRefs refs;
     if (protocol_ls_refs(url, &refs) != 0) {
         remote_refs_free(&refs);
         die("cannot read refs from %s", url);
+    }
+
+    /* Single-branch: keep only HEAD and the chosen branch/tag's refs. */
+    if (single_branch && !refs.empty) {
+        const char *sb_name = branch;
+        if (!sb_name && refs.default_ref &&
+            strncmp(refs.default_ref, "refs/heads/", 11) == 0)
+            sb_name = refs.default_ref + 11;
+
+        if (sb_name && *sb_name) {
+            char hbuf[512], tbuf[512];
+            snprintf(hbuf, sizeof(hbuf), "refs/heads/%s", sb_name);
+            snprintf(tbuf, sizeof(tbuf), "refs/tags/%s", sb_name);
+
+            size_t w = 0;
+            for (size_t i = 0; i < refs.count; i++) {
+                Ref *r = &refs.refs[i];
+                int keep = (strcmp(r->name, "HEAD") == 0 ||
+                            strcmp(r->name, hbuf) == 0 ||
+                            strcmp(r->name, tbuf) == 0);
+                if (keep) {
+                    if (w != i)
+                        refs.refs[w] = refs.refs[i];
+                    w++;
+                } else {
+                    free(refs.refs[i].name);
+                    free(refs.refs[i].symref);
+                }
+            }
+            refs.count = w;
+        }
     }
 
     /* Resolve the requested branch/tag (or the remote's default). */
