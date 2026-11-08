@@ -122,6 +122,12 @@ int url_resolve(const char *arg, const char *default_host,
         buf_appendf(&b, "https://bitbucket.org/%s", arg + 3);
         url = (char *)b.data;
         is_shorthand = 1;
+    } else if (strncmp(arg, "sym:", 4) == 0) {
+        Buf b;
+        buf_init(&b);
+        buf_appendf(&b, "https://git.symlinx.net/%s", arg + 4);
+        url = (char *)b.data;
+        is_shorthand = 1;
     } else if (strstr(arg, "://")) {
         url = xstrdup(arg);
     } else {

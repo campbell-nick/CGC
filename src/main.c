@@ -22,6 +22,7 @@ static void usage(FILE *out)
             "  gh:owner/repo                         GitHub shorthand\n"
             "  gl:owner/repo                         GitLab shorthand\n"
             "  bb:owner/repo                         Bitbucket shorthand\n"
+            "  sym:owner/repo                        git.symlinx.net shorthand\n"
             "  owner/repo                            default host shorthand\n"
             "  host.tld/owner/repo                   explicit host, no scheme\n"
             "\n"
