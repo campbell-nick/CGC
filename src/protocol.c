@@ -3,6 +3,7 @@
 #include "odb.h"
 #include "pack.h"
 #include "pktline.h"
+#include "progress.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -294,6 +295,157 @@ static int oid_seen(const unsigned char (*oids)[OID_RAW], size_t n,
     return 0;
 }
 
+typedef struct {
+    int section;   /* 0 none, 1 packfile, 2 other */
+    int sideband;  /* -1 undecided, 0 raw, 1 sideband */
+    int done;
+    int failed;
+    Buf pack;
+    Buf pending;
+    Buf error;
+} FetchDemux;
+
+static int is_section_name(const unsigned char *line, size_t len,
+                           const char *name)
+{
+    size_t l = len;
+    while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r'))
+        l--;
+    return l == strlen(name) && memcmp(line, name, l) == 0;
+}
+
+static void demux_line(FetchDemux *d, const unsigned char *line, size_t len)
+{
+    if (d->section == 0) {
+        if (is_section_name(line, len, "packfile")) {
+            d->section = 1;
+            d->sideband = -1;
+        } else if (is_section_name(line, len, "acknowledgments") ||
+                   is_section_name(line, len, "shallow-info") ||
+                   is_section_name(line, len, "wanted-refs") ||
+                   is_section_name(line, len, "packfile-uris")) {
+            d->section = 2;
+        } else if (len >= 4 && memcmp(line, "PACK", 4) == 0) {
+            d->section = 1;
+            d->sideband = 0;
+            buf_append(&d->pack, line, len);
+            progress_receive_update(d->pack.len);
+        } else {
+            d->section = 2;
+        }
+        return;
+    }
+
+    if (d->section != 1)
+        return;
+
+    if (d->sideband < 0)
+        d->sideband = (len >= 1 && line[0] >= 1 && line[0] <= 3);
+
+    if (!d->sideband) {
+        buf_append(&d->pack, line, len);
+        progress_receive_update(d->pack.len);
+        return;
+    }
+
+    if (len < 1)
+        return;
+    int band = line[0];
+    const unsigned char *payload = line + 1;
+    size_t plen = len - 1;
+
+    if (band == 1) {
+        buf_append(&d->pack, payload, plen);
+        progress_receive_update(d->pack.len);
+    } else if (band == 2) {
+        progress_remote(payload, plen);
+    } else {
+        progress_clear();
+        if (d->error.len)
+            buf_putc(&d->error, '\n');
+        buf_append(&d->error, payload, plen);
+    }
+}
+
+static int fetch_feed(void *ud, const void *data, size_t len)
+{
+    FetchDemux *d = ud;
+    if (d->failed || d->done)
+        return 0;
+
+    buf_append(&d->pending, data, len);
+
+    size_t pos = 0;
+    while (!d->done && d->pending.len - pos >= 4) {
+        const unsigned char *p = d->pending.data + pos;
+        int v = 0;
+        int ok = 1;
+        for (int i = 0; i < 4; i++) {
+            int c = p[i];
+            int h;
+            if (c >= '0' && c <= '9')
+                h = c - '0';
+            else if (c >= 'a' && c <= 'f')
+                h = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F')
+                h = c - 'A' + 10;
+            else {
+                ok = 0;
+                break;
+            }
+            v = (v << 4) | h;
+        }
+        if (!ok || v == 3) {
+            d->failed = 1;
+            return -1;
+        }
+        if (v == 0) {
+            if (d->section == 1)
+                d->done = 1;
+            d->section = 0;
+            pos += 4;
+            continue;
+        }
+        if (v == 1 || v == 2) {
+            d->section = 0;
+            pos += 4;
+            continue;
+        }
+        if (v < 4) {
+            d->failed = 1;
+            return -1;
+        }
+        size_t plen = (size_t)v - 4;
+        if (d->pending.len - pos - 4 < plen)
+            break;
+        demux_line(d, p + 4, plen);
+        pos += 4 + plen;
+    }
+
+    buf_consume(&d->pending, pos);
+    return d->failed ? -1 : 0;
+}
+
+static int fetch_request(const char *url, Buf *req, FetchDemux *d,
+                         HttpResponse *resp)
+{
+    char *u = endpoint(url, "/git-upload-pack");
+    int rc = http_request_stream("POST", u,
+                                 "application/x-git-upload-pack-request",
+                                 req->data, req->len,
+                                 "Git-Protocol: version=2\r\n"
+                                 "Accept: application/x-git-upload-pack-result\r\n",
+                                 fetch_feed, d, resp);
+    free(u);
+    return rc;
+}
+
+static void delta_progress(void *ud, uint32_t done, uint32_t total)
+{
+    (void)ud;
+    progress_deltas_update(done, total);
+}
+
 int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir)
 {
     if (refs->empty)
@@ -329,6 +481,8 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir)
     pkt_write_str(&req, "object-format=sha1\n");
     pkt_delim(&req);
     pkt_write_str(&req, "ofs-delta\n");
+    if (!progress_live_enabled())
+        pkt_write_str(&req, "no-progress\n");
     for (size_t i = 0; i < nwants; i++) {
         char hex[OID_HEX + 1];
         oid_hex(wants[i], hex);
@@ -340,105 +494,63 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir)
     pkt_flush(&req);
     free(wants);
 
+    FetchDemux demux;
+    memset(&demux, 0, sizeof(demux));
+    demux.section = 0;
+    demux.sideband = -1;
+    buf_init(&demux.pack);
+    buf_init(&demux.pending);
+    buf_init(&demux.error);
+
     HttpResponse resp;
-    if (post_command(url, "/git-upload-pack", &req, &resp) != 0) {
-        buf_free(&req);
+    progress_receive_begin();
+    int rc = fetch_request(url, &req, &demux, &resp);
+    buf_free(&req);
+    if (rc != 0) {
+        buf_free(&demux.pack);
+        buf_free(&demux.pending);
+        buf_free(&demux.error);
         return -1;
     }
-    buf_free(&req);
+
+    progress_remote_end();
 
     if (resp.status != 200) {
         warn_cgc("remote returned HTTP %d while fetching", resp.status);
         http_response_free(&resp);
+        buf_free(&demux.pack);
+        buf_free(&demux.pending);
+        buf_free(&demux.error);
         return -1;
     }
 
-    PktReader pr;
-    pkt_reader_init(&pr, resp.body.data, resp.body.len);
-    const unsigned char *line;
-    size_t linelen;
-    int kind;
-    int section = 0; /* 0 none, 1 pack, 2 other */
-    int sideband = -1;
-    Buf pack;
-    buf_init(&pack);
-
-    for (;;) {
-        kind = pkt_read(&pr, &line, &linelen);
-        if (kind == PKT_EOF)
-            break;
-        if (kind == PKT_FLUSH) {
-            if (section == 1)
-                break;
-            section = 0;
-            continue;
-        }
-        if (kind == PKT_DELIM) {
-            section = 0;
-            continue;
-        }
-        if (kind != PKT_DATA)
-            continue;
-
-        if (section == 0) {
-            size_t l = linelen;
-            while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r'))
-                l--;
-            if (l == 8 && memcmp(line, "packfile", 8) == 0) {
-                section = 1;
-                sideband = -1;
-            } else if ((l == 15 && memcmp(line, "acknowledgments", 15) == 0) ||
-                       (l == 12 && memcmp(line, "shallow-info", 12) == 0) ||
-                       (l == 11 && memcmp(line, "wanted-refs", 11) == 0) ||
-                       (l == 13 && memcmp(line, "packfile-uris", 13) == 0)) {
-                section = 2;
-            } else if (linelen >= 4 && memcmp(line, "PACK", 4) == 0) {
-                section = 1;
-                sideband = 0;
-                buf_append(&pack, line, linelen);
-            } else {
-                /* Tolerate unknown section headers. */
-                section = 2;
-            }
-            continue;
-        }
-
-        if (section == 1) {
-            if (sideband < 0) {
-                if (linelen >= 1 && line[0] >= 1 && line[0] <= 3)
-                    sideband = 1;
-                else
-                    sideband = 0;
-            }
-            if (sideband) {
-                if (linelen < 1)
-                    continue;
-                int band = line[0];
-                const unsigned char *payload = line + 1;
-                size_t plen = linelen - 1;
-                if (band == 1) {
-                    buf_append(&pack, payload, plen);
-                } else if (band == 2) {
-                    if (!cgc_quiet && isatty(STDERR_FILENO)) {
-                        fwrite(payload, 1, plen, stderr);
-                        fflush(stderr);
-                    }
-                } else if (band == 3) {
-                    char *msg = trim_newline(payload, plen);
-                    warn_cgc("remote error: %s", msg);
-                    free(msg);
-                    buf_free(&pack);
-                    http_response_free(&resp);
-                    return -1;
-                }
-            } else {
-                buf_append(&pack, line, linelen);
-            }
-        }
+    if (demux.failed || demux.pending.len > 0) {
+        warn_cgc("malformed fetch response");
+        http_response_free(&resp);
+        buf_free(&demux.pack);
+        buf_free(&demux.pending);
+        buf_free(&demux.error);
+        return -1;
     }
 
-    /* A flush (or the end of the body) terminates the packfile section. */
+    if (demux.error.len > 0) {
+        char *msg = trim_newline(demux.error.data, demux.error.len);
+        warn_cgc("remote error: %s", msg);
+        free(msg);
+        http_response_free(&resp);
+        buf_free(&demux.pack);
+        buf_free(&demux.pending);
+        buf_free(&demux.error);
+        return -1;
+    }
+
     http_response_free(&resp);
+
+    Buf pack;
+    pack = demux.pack;
+    buf_init(&demux.pack);
+    buf_free(&demux.pending);
+    buf_free(&demux.error);
 
     if (pack.len < 12 || memcmp(pack.data, "PACK", 4) != 0) {
         warn_cgc("remote did not send a valid packfile");
@@ -446,11 +558,19 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir)
         return -1;
     }
 
-    int rc = pack_unpack(pack.data, pack.len, gitdir);
+    uint32_t objects = get_be32(pack.data + 8);
+    progress_receive_end(objects, pack.len);
+
+    PackStats stats;
+    memset(&stats, 0, sizeof(stats));
+    rc = pack_unpack(pack.data, pack.len, gitdir, &stats,
+                     delta_progress, NULL);
     buf_free(&pack);
     if (rc != 0) {
+        progress_clear();
         warn_cgc("failed to unpack packfile");
         return -1;
     }
+    progress_deltas_end(stats.deltas);
     return 0;
 }

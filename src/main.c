@@ -96,7 +96,7 @@ int main(int argc, char **argv)
         die("cannot create destination '%s': %s", dest, strerror(errno));
 
     if (!quiet)
-        fprintf(stderr, "cgc: cloning into '%s'\n", dest);
+        fprintf(stderr, "Cloning into '%s'...\n", dest);
 
     char *gitdir = path_join(dest, ".git");
     if (repo_init(gitdir) != 0)
@@ -114,13 +114,7 @@ int main(int argc, char **argv)
         repo_set_head(gitdir, head_ref) != 0)
         die("cannot write repository configuration");
 
-    if (!quiet)
-        fprintf(stderr, "cgc: found %zu ref%s\n", refs.count,
-                refs.count == 1 ? "" : "s");
-
     if (!refs.empty) {
-        if (!quiet)
-            fprintf(stderr, "cgc: fetching objects...\n");
         if (protocol_fetch(url, &refs, gitdir) != 0) {
             remote_refs_free(&refs);
             die("fetch failed");
@@ -128,8 +122,6 @@ int main(int argc, char **argv)
         repo_write_refs(gitdir, &refs);
 
         if (refs.has_default_oid) {
-            if (!quiet)
-                fprintf(stderr, "cgc: checking out %s\n", head_ref);
             if (checkout_commit(gitdir, dest, refs.default_oid) != 0) {
                 remote_refs_free(&refs);
                 die("checkout failed");
@@ -137,17 +129,7 @@ int main(int argc, char **argv)
         }
     } else {
         fprintf(stderr,
-                "cgc: warning: you appear to have cloned an empty repository\n");
-    }
-
-    if (!quiet) {
-        if (refs.has_default_oid) {
-            char hex[OID_HEX + 1];
-            oid_hex(refs.default_oid, hex);
-            fprintf(stderr, "cgc: done, %s at %.7s\n", head_ref, hex);
-        } else {
-            fprintf(stderr, "cgc: done\n");
-        }
+                "warning: You appear to have cloned an empty repository.\n");
     }
 
     remote_refs_free(&refs);

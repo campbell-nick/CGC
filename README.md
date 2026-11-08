@@ -82,6 +82,14 @@ CGC_DEFAULT_HOST=git.example.com cgc team/repo
 -V, --version   show version
 ```
 
+### Output
+
+Status is written to stderr in the same style as `git clone`: `Cloning into
+'...'...`, any `remote:` messages from the server, a `Receiving objects`
+download meter, `Resolving deltas`, and `Updating files` during checkout. Live
+meters are drawn on a terminal; a final summary line is printed when output is
+redirected. `--quiet` suppresses all of it.
+
 ## How it works
 
 1. **Address resolution** (`url.c`) — turns a URL or shorthand into an HTTPS
@@ -116,6 +124,7 @@ src/
   http.c       HTTP/1.1 over TCP + OpenSSL, chunked bodies, redirects
   pktline.c    Git pkt-line framing
   protocol.c   protocol v2: discovery, ls-refs, fetch, sideband
+  progress.c   Git-style status output and progress meters
   pack.c       packfile parsing, delta resolution
   odb.c        loose object read/write and hashing
   repo.c       .git skeleton, config, refs, HEAD

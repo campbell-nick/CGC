@@ -187,66 +187,135 @@ static size_t find_header_end(const unsigned char *p, size_t len)
     return 0;
 }
 
-/* Decode a chunked body. Returns 0 when complete, 1 when more data is
- * needed, -1 on malformed input. If out is non-NULL, appends decoded data. */
-static int chunked_scan(const unsigned char *in, size_t len, Buf *out)
+typedef struct {
+    int chunked;
+    long long content_length;
+    size_t body_seen;
+    int state;
+    size_t chunk_remaining;
+    int done;
+    Buf pending;
+    http_body_fn sink;
+    void *ud;
+} BodyDecoder;
+
+enum {
+    CHUNK_SIZE,
+    CHUNK_DATA,
+    CHUNK_CRLF,
+    CHUNK_TRAILER,
+};
+
+static int append_sink(void *ud, const void *data, size_t len)
 {
-    size_t pos = 0;
-    for (;;) {
-        size_t line_end = pos;
-        while (line_end + 1 < len &&
-               !(in[line_end] == '\r' && in[line_end + 1] == '\n'))
-            line_end++;
-        if (line_end + 1 >= len)
-            return 1;
+    buf_append((Buf *)ud, data, len);
+    return 0;
+}
 
-        size_t q = pos;
-        size_t size = 0;
-        int digits = 0;
-        while (q < line_end) {
-            int c = in[q];
-            int d;
-            if (c >= '0' && c <= '9')
-                d = c - '0';
-            else if (c >= 'a' && c <= 'f')
-                d = c - 'a' + 10;
-            else if (c >= 'A' && c <= 'F')
-                d = c - 'A' + 10;
-            else
-                break;
-            size = size * 16 + (size_t)d;
-            digits = 1;
-            q++;
+static int discard_sink(void *ud, const void *data, size_t len)
+{
+    (void)ud;
+    (void)data;
+    (void)len;
+    return 0;
+}
+
+/* Feed raw body bytes to the decoder, which strips Transfer-Encoding chunk
+ * framing and hands payload to sink in order. Returns 0 or -1 if malformed. */
+static int decoder_feed(BodyDecoder *d, const unsigned char *in, size_t len)
+{
+    if (d->done || len == 0)
+        return 0;
+
+    if (!d->chunked) {
+        size_t take = len;
+        if (d->content_length >= 0) {
+            size_t left = (size_t)d->content_length - d->body_seen;
+            if (take > left)
+                take = left;
         }
-        if (!digits || size > (1u << 30))
+        if (take && d->sink(d->ud, in, take) != 0)
             return -1;
-        pos = line_end + 2;
+        d->body_seen += take;
+        if (d->content_length >= 0 &&
+            d->body_seen >= (size_t)d->content_length)
+            d->done = 1;
+        return 0;
+    }
 
-        if (size == 0) {
-            /* Optional trailers, ending with a blank line. */
-            for (;;) {
-                size_t e = pos;
-                while (e + 1 < len &&
-                       !(in[e] == '\r' && in[e + 1] == '\n'))
-                    e++;
-                if (e + 1 >= len)
-                    return 1;
-                int blank = (e == pos);
-                pos = e + 2;
-                if (blank)
-                    return 0;
+    buf_append(&d->pending, in, len);
+    size_t pos = 0;
+
+    while (pos < d->pending.len) {
+        if (d->state == CHUNK_SIZE) {
+            size_t e = pos;
+            while (e + 1 < d->pending.len &&
+                   !(d->pending.data[e] == '\r' &&
+                     d->pending.data[e + 1] == '\n'))
+                e++;
+            if (e + 1 >= d->pending.len)
+                break;
+
+            size_t size = 0;
+            int digits = 0;
+            for (size_t q = pos; q < e; q++) {
+                int c = d->pending.data[q];
+                int v;
+                if (c >= '0' && c <= '9')
+                    v = c - '0';
+                else if (c >= 'a' && c <= 'f')
+                    v = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F')
+                    v = c - 'A' + 10;
+                else
+                    break;
+                size = size * 16 + (size_t)v;
+                digits = 1;
+            }
+            if (!digits || size > (1u << 30))
+                return -1;
+
+            pos = e + 2;
+            d->chunk_remaining = size;
+            d->state = size ? CHUNK_DATA : CHUNK_TRAILER;
+        } else if (d->state == CHUNK_DATA) {
+            size_t avail = d->pending.len - pos;
+            size_t take = avail < d->chunk_remaining ? avail : d->chunk_remaining;
+            if (take && d->sink(d->ud, d->pending.data + pos, take) != 0)
+                return -1;
+            pos += take;
+            d->body_seen += take;
+            d->chunk_remaining -= take;
+            if (d->chunk_remaining)
+                break;
+            d->state = CHUNK_CRLF;
+        } else if (d->state == CHUNK_CRLF) {
+            if (d->pending.len - pos < 2)
+                break;
+            if (d->pending.data[pos] != '\r' ||
+                d->pending.data[pos + 1] != '\n')
+                return -1;
+            pos += 2;
+            d->state = CHUNK_SIZE;
+        } else {
+            size_t e = pos;
+            while (e + 1 < d->pending.len &&
+                   !(d->pending.data[e] == '\r' &&
+                     d->pending.data[e + 1] == '\n'))
+                e++;
+            if (e + 1 >= d->pending.len)
+                break;
+            int blank = (e == pos);
+            pos = e + 2;
+            if (blank) {
+                d->done = 1;
+                break;
             }
         }
-
-        if (pos + size + 2 > len)
-            return 1;
-        if (out)
-            buf_append(out, in + pos, size);
-        pos += size;
-        if (in[pos] != '\r' || in[pos + 1] != '\n')
-            return -1;
-        pos += 2;
     }
+
+    buf_consume(&d->pending, pos);
+    return 0;
 }
 
 static char *header_value(char *headers, const char *name)
@@ -315,6 +384,7 @@ static int request_once(const char *method, const char *url,
                         const char *content_type,
                         const void *body, size_t bodylen,
                         const char *extra_headers,
+                        http_body_fn on_body, void *ud,
                         HttpResponse *resp)
 {
     Url u;
@@ -366,40 +436,40 @@ static int request_once(const char *method, const char *url,
 
     Buf raw;
     buf_init(&raw);
+    buf_init(&resp->body);
+
     size_t hdr_end = 0;
     int status = 0;
     long long content_length = -1;
     int chunked = 0;
     char *content_type_resp = NULL;
     char *location = NULL;
+    int failed = 0;
+
+    BodyDecoder dec;
+    memset(&dec, 0, sizeof(dec));
+    buf_init(&dec.pending);
+    dec.sink = append_sink;
+    dec.ud = &resp->body;
 
     for (;;) {
         buf_reserve(&raw, 16384);
-        ssize_t n = conn_read(&c, raw.data + raw.len, raw.cap - raw.len);
+        ssize_t n = conn_read(&c, raw.data + raw.len, raw.cap - raw.len - 1);
         if (n < 0) {
             warn_cgc("error reading response from %s", u.host);
-            buf_free(&raw);
-            free(content_type_resp);
-            free(location);
-            conn_close(&c);
-            url_free(&u);
-            return -1;
+            failed = 1;
+            break;
         }
 
         if (n == 0) {
             if (!hdr_end) {
                 warn_cgc("connection closed before HTTP headers arrived");
-                buf_free(&raw);
-                free(location);
-                conn_close(&c);
-                url_free(&u);
-                return -1;
+                failed = 1;
             }
             break;
         }
         raw.len += (size_t)n;
-        if (raw.data)
-            raw.data[raw.len] = 0;
+        raw.data[raw.len] = 0;
 
         if (!hdr_end) {
             hdr_end = find_header_end(raw.data, raw.len);
@@ -411,18 +481,13 @@ static int request_once(const char *method, const char *url,
             if (!line_end || sscanf(headers, "HTTP/%*d.%*d %d", &status) != 1) {
                 warn_cgc("malformed HTTP response from %s", u.host);
                 free(headers);
-                buf_free(&raw);
-                free(content_type_resp);
-                free(location);
-                conn_close(&c);
-                url_free(&u);
-                return -1;
+                failed = 1;
+                break;
             }
             *line_end = 0;
-            char *ct = header_value(line_end + 2, "Content-Type");
+            content_type_resp = header_value(line_end + 2, "Content-Type");
             char *cl = header_value(line_end + 2, "Content-Length");
             char *te = header_value(line_end + 2, "Transfer-Encoding");
-            content_type_resp = ct;
             location = header_value(line_end + 2, "Location");
             if (te && contains_ci(te, "chunked"))
                 chunked = 1;
@@ -435,61 +500,72 @@ static int request_once(const char *method, const char *url,
             free(cl);
             free(te);
             free(headers);
+
+            dec.chunked = chunked;
+            dec.content_length = content_length;
+            dec.state = CHUNK_SIZE;
+            if (!chunked && content_length == 0)
+                dec.done = 1;
+
+            if (on_body) {
+                if (status == 200) {
+                    dec.sink = on_body;
+                    dec.ud = ud;
+                } else {
+                    dec.sink = discard_sink;
+                    dec.ud = NULL;
+                }
+            }
         }
 
         size_t have = raw.len - hdr_end;
-        if (chunked) {
-            int rc = chunked_scan(raw.data + hdr_end, have, NULL);
-            if (rc == 0)
+        if (have > 0) {
+            if (decoder_feed(&dec, raw.data + hdr_end, have) != 0) {
+                warn_cgc("malformed response body from %s", u.host);
+                failed = 1;
                 break;
-            if (rc < 0) {
-                warn_cgc("malformed chunked response from %s", u.host);
-                buf_free(&raw);
-                free(content_type_resp);
-                free(location);
-                conn_close(&c);
-                url_free(&u);
-                return -1;
             }
-        } else if (content_length >= 0 && have >= (size_t)content_length) {
-            break;
+            raw.len = hdr_end;
         }
+        if (dec.done)
+            break;
+    }
+
+    if (!failed && hdr_end && !dec.done) {
+        if (dec.chunked) {
+            warn_cgc("truncated chunked response from %s", u.host);
+            failed = 1;
+        } else if (dec.content_length >= 0 &&
+                   dec.body_seen < (size_t)dec.content_length) {
+            warn_cgc("truncated response from %s", u.host);
+            failed = 1;
+        }
+    }
+
+    buf_free(&dec.pending);
+    buf_free(&raw);
+    conn_close(&c);
+    url_free(&u);
+
+    if (failed) {
+        buf_free(&resp->body);
+        free(content_type_resp);
+        free(location);
+        return -1;
     }
 
     resp->status = status;
     resp->content_type = content_type_resp;
     resp->location = location;
-    buf_init(&resp->body);
-    if (hdr_end <= raw.len) {
-        const unsigned char *b = raw.data + hdr_end;
-        size_t blen = raw.len - hdr_end;
-        if (chunked) {
-            if (chunked_scan(b, blen, &resp->body) != 0) {
-                warn_cgc("malformed chunked response from %s", u.host);
-                buf_free(&raw);
-                http_response_free(resp);
-                conn_close(&c);
-                url_free(&u);
-                return -1;
-            }
-        } else {
-            if (content_length >= 0 && blen > (size_t)content_length)
-                blen = (size_t)content_length;
-            buf_append(&resp->body, b, blen);
-        }
-    }
-
-    buf_free(&raw);
-    conn_close(&c);
-    url_free(&u);
     return 0;
 }
 
-int http_request(const char *method, const char *url,
-                 const char *content_type,
-                 const void *body, size_t bodylen,
-                 const char *extra_headers,
-                 HttpResponse *resp)
+static int do_request(const char *method, const char *url,
+                      const char *content_type,
+                      const void *body, size_t bodylen,
+                      const char *extra_headers,
+                      http_body_fn on_body, void *ud,
+                      HttpResponse *resp)
 {
     memset(resp, 0, sizeof(*resp));
     char *current = xstrdup(url);
@@ -502,7 +578,8 @@ int http_request(const char *method, const char *url,
         HttpResponse r;
         memset(&r, 0, sizeof(r));
         if (request_once(cur_method, current, content_type,
-                         cur_body, cur_bodylen, extra_headers, &r) != 0) {
+                         cur_body, cur_bodylen, extra_headers,
+                         on_body, ud, &r) != 0) {
             http_response_free(&r);
             goto out;
         }
@@ -546,4 +623,25 @@ out:
     free(current);
     free(cur_method);
     return rc;
+}
+
+int http_request(const char *method, const char *url,
+                 const char *content_type,
+                 const void *body, size_t bodylen,
+                 const char *extra_headers,
+                 HttpResponse *resp)
+{
+    return do_request(method, url, content_type, body, bodylen,
+                      extra_headers, NULL, NULL, resp);
+}
+
+int http_request_stream(const char *method, const char *url,
+                        const char *content_type,
+                        const void *body, size_t bodylen,
+                        const char *extra_headers,
+                        http_body_fn on_body, void *ud,
+                        HttpResponse *resp)
+{
+    return do_request(method, url, content_type, body, bodylen,
+                      extra_headers, on_body, ud, resp);
 }

@@ -1,5 +1,6 @@
 #include "checkout.h"
 #include "odb.h"
+#include "progress.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -24,8 +25,7 @@ typedef struct {
 } Index;
 
 static void index_add(Index *idx, const char *path,
-                      const unsigned char oid[OID_RAW], uint32_t mode,
-                      const struct stat *st)
+                      const unsigned char oid[OID_RAW], uint32_t mode)
 {
     if (idx->count == idx->cap) {
         idx->cap = idx->cap ? idx->cap * 2 : 64;
@@ -36,10 +36,6 @@ static void index_add(Index *idx, const char *path,
     e->path = xstrdup(path);
     memcpy(e->oid, oid, OID_RAW);
     e->mode = mode;
-    if (st) {
-        e->st = *st;
-        e->has_stat = 1;
-    }
 }
 
 static int cmp_entry(const void *a, const void *b)
@@ -134,52 +130,10 @@ static char *join_rel(const char *prefix, const char *name)
     return (char *)b.data;
 }
 
-static int write_blob_to_worktree(const char *gitdir, const char *worktree,
-                                  const char *relpath,
-                                  const unsigned char oid[OID_RAW],
-                                  unsigned file_mode, int symlink_mode)
-{
-    int type = 0;
-    Buf data;
-    buf_init(&data);
-    int r = odb_read(gitdir, oid, &type, &data);
-    if (r <= 0 || type != OBJ_BLOB) {
-        buf_free(&data);
-        warn_cgc("missing blob %s", relpath);
-        return -1;
-    }
-
-    char *path = path_join(worktree, relpath);
-    char *dir = path_dirname(path);
-    if (mkdir_p(dir, 0777) != 0) {
-        free(dir);
-        free(path);
-        buf_free(&data);
-        return -1;
-    }
-    free(dir);
-
-    int rc = 0;
-    if (symlink_mode) {
-        if (data.len >= data.cap)
-            buf_reserve(&data, 1);
-        data.data[data.len] = 0;
-        unlink(path);
-        if (symlink((char *)data.data, path) != 0)
-            rc = -1;
-    } else {
-        if (write_file(path, data.data, data.len,
-                       file_mode & 0111 ? 0755 : 0644) != 0)
-            rc = -1;
-    }
-    free(path);
-    buf_free(&data);
-    return rc;
-}
-
-static int checkout_tree(const char *gitdir, const char *worktree,
-                         const unsigned char tree_oid[OID_RAW],
-                         const char *prefix, Index *idx)
+/* Walk the tree once and collect every entry. Nothing is written yet, so the
+ * total file count is known before checkout and can drive the progress meter. */
+static int collect_tree(const char *gitdir, const unsigned char tree_oid[OID_RAW],
+                        const char *prefix, Index *idx)
 {
     int type = 0;
     Buf tree;
@@ -223,46 +177,18 @@ static int checkout_tree(const char *gitdir, const char *worktree,
         free(name);
 
         if ((mode & 0170000) == 0040000) {
-            char *path = path_join(worktree, rel);
-            char *dir = path_dirname(path);
-            mkdir_p(dir, 0777);
-            free(dir);
-            free(path);
-            if (checkout_tree(gitdir, worktree, oid, rel, idx) != 0) {
+            if (collect_tree(gitdir, oid, rel, idx) != 0) {
                 free(rel);
                 buf_free(&tree);
                 return -1;
             }
         } else if ((mode & 0170000) == 0160000) {
-            /* Submodule: create the mount point, but do not fetch it. */
-            char *path = path_join(worktree, rel);
-            mkdir_p(path, 0777);
-            free(path);
-            index_add(idx, rel, oid, 0160000, NULL);
+            index_add(idx, rel, oid, 0160000);
         } else if ((mode & 0170000) == 0120000) {
-            if (write_blob_to_worktree(gitdir, worktree, rel, oid, mode, 1) != 0) {
-                free(rel);
-                buf_free(&tree);
-                return -1;
-            }
-            char *path = path_join(worktree, rel);
-            struct stat st;
-            if (lstat(path, &st) == 0)
-                index_add(idx, rel, oid, 0120000, &st);
-            free(path);
+            index_add(idx, rel, oid, 0120000);
         } else {
-            if (write_blob_to_worktree(gitdir, worktree, rel, oid, mode, 0) != 0) {
-                free(rel);
-                buf_free(&tree);
-                return -1;
-            }
-            char *path = path_join(worktree, rel);
-            struct stat st;
-            if (stat(path, &st) == 0) {
-                uint32_t imode = 0100000 | ((mode & 0111) ? 0755 : 0644);
-                index_add(idx, rel, oid, imode, &st);
-            }
-            free(path);
+            uint32_t imode = 0100000 | ((mode & 0111) ? 0755 : 0644);
+            index_add(idx, rel, oid, imode);
         }
         free(rel);
     }
@@ -273,6 +199,91 @@ static int checkout_tree(const char *gitdir, const char *worktree,
 corrupt:
     buf_free(&tree);
     return -1;
+}
+
+static int write_blob_to_worktree(const char *gitdir, const char *worktree,
+                                  const char *relpath,
+                                  const unsigned char oid[OID_RAW],
+                                  unsigned file_mode, int symlink_mode)
+{
+    int type = 0;
+    Buf data;
+    buf_init(&data);
+    int r = odb_read(gitdir, oid, &type, &data);
+    if (r <= 0 || type != OBJ_BLOB) {
+        buf_free(&data);
+        warn_cgc("missing blob %s", relpath);
+        return -1;
+    }
+
+    char *path = path_join(worktree, relpath);
+    int rc = 0;
+    if (symlink_mode) {
+        if (data.len >= data.cap)
+            buf_reserve(&data, 1);
+        data.data[data.len] = 0;
+        unlink(path);
+        if (symlink((char *)data.data, path) != 0)
+            rc = -1;
+    } else {
+        if (write_file(path, data.data, data.len,
+                       file_mode & 0111 ? 0755 : 0644) != 0)
+            rc = -1;
+    }
+    free(path);
+    buf_free(&data);
+    return rc;
+}
+
+static int materialize(const char *gitdir, const char *worktree, Index *idx)
+{
+    progress_checkout_begin(idx->count);
+
+    for (size_t i = 0; i < idx->count; i++) {
+        IndexEntry *e = &idx->entries[i];
+        char *path = path_join(worktree, e->path);
+
+        if (e->mode == 0160000) {
+            if (mkdir_p(path, 0777) != 0) {
+                free(path);
+                progress_clear();
+                return -1;
+            }
+            free(path);
+            progress_checkout_update(i + 1, idx->count);
+            continue;
+        }
+
+        char *dir = path_dirname(path);
+        if (mkdir_p(dir, 0777) != 0) {
+            free(dir);
+            free(path);
+            progress_clear();
+            return -1;
+        }
+        free(dir);
+
+        int symlink_mode = (e->mode == 0120000);
+        if (write_blob_to_worktree(gitdir, worktree, e->path, e->oid,
+                                   e->mode, symlink_mode) != 0) {
+            free(path);
+            progress_clear();
+            return -1;
+        }
+
+        if (symlink_mode) {
+            if (lstat(path, &e->st) == 0)
+                e->has_stat = 1;
+        } else if (stat(path, &e->st) == 0) {
+            e->has_stat = 1;
+        }
+
+        free(path);
+        progress_checkout_update(i + 1, idx->count);
+    }
+
+    progress_checkout_end(idx->count);
+    return 0;
 }
 
 static const unsigned char *commit_tree(const unsigned char *data, size_t len)
@@ -316,7 +327,9 @@ int checkout_commit(const char *gitdir, const char *worktree,
 
     Index idx;
     memset(&idx, 0, sizeof(idx));
-    int rc = checkout_tree(gitdir, worktree, tree_copy, "", &idx);
+    int rc = collect_tree(gitdir, tree_copy, "", &idx);
+    if (rc == 0)
+        rc = materialize(gitdir, worktree, &idx);
     if (rc == 0)
         index_write(gitdir, &idx);
 

@@ -158,7 +158,8 @@ fail:
     return -1;
 }
 
-int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir)
+int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir,
+                PackStats *stats, pack_delta_fn on_delta, void *ud)
 {
     if (len < 12 + OID_RAW || memcmp(pack, "PACK", 4) != 0)
         return -1;
@@ -179,6 +180,7 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir)
     PackEntry *entries = xcalloc(count ? count : 1, sizeof(PackEntry));
     OidMap map = {NULL, 0};
     size_t pos = 12;
+    uint32_t delta_total = 0;
 
     for (uint32_t i = 0; i < count; i++) {
         PackEntry *e = &entries[i];
@@ -234,6 +236,8 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir)
         e->type = type;
         e->size = size;
         e->data = inflated.data;
+        if (type == OBJ_OFS_DELTA || type == OBJ_REF_DELTA)
+            delta_total++;
     }
 
     if (pos + OID_RAW != len) {
@@ -244,6 +248,7 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir)
     map_init(&map, count);
 
     size_t unresolved = count;
+    uint32_t delta_done = 0;
     for (uint32_t pass = 0; unresolved > 0 && pass <= count; pass++) {
         size_t progressed = 0;
 
@@ -251,6 +256,8 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir)
             PackEntry *e = &entries[i];
             if (e->resolved)
                 continue;
+            int was_delta = (e->type == OBJ_OFS_DELTA ||
+                             e->type == OBJ_REF_DELTA);
 
             if (e->type >= OBJ_COMMIT && e->type <= OBJ_TAG) {
                 hash_object(e->type, e->data, (size_t)e->size, e->oid);
@@ -317,6 +324,11 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir)
             map_put(&map, e->oid, i);
             unresolved--;
             progressed++;
+            if (was_delta) {
+                delta_done++;
+                if (on_delta)
+                    on_delta(ud, delta_done, delta_total);
+            }
         }
 
         if (!progressed)
@@ -340,6 +352,10 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir)
         free(entries[i].data);
     free(entries);
     free(map.slots);
+    if (stats) {
+        stats->objects = count;
+        stats->deltas = delta_total;
+    }
     return 0;
 
 fail:
