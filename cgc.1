@@ -1,4 +1,4 @@
-.TH CGC 1 "2026-11-08" "cgc 0.1.0" "User Commands"
+.TH CGC 1 "2026-11-09" "cgc 0.2.0" "User Commands"
 .SH NAME
 cgc \- clone a Git repository over smart HTTP
 .SH SYNOPSIS
@@ -74,6 +74,12 @@ or
 environment variables. Tokens are never written to
 .BR .git/config .
 .TP
+.B \-\-token\-file \fIpath\fR
+Read the bearer token from the first line of
+.IR path ,
+trimming surrounding whitespace. This keeps the token out of the process
+argument list. The file is read before the clone starts.
+.TP
 .BR \-b ", " \-\-branch " \fIname\fR"
 Check out
 .I name
@@ -139,6 +145,18 @@ Default host used for the
 shorthand when
 .B \-\-host
 is not given.
+.TP
+.B CGC_TOKEN
+Bearer token for HTTPS authentication. Used when
+.B \-\-token
+and
+.B \-\-token\-file
+are not given.
+.TP
+.B GIT_TOKEN
+Fallback bearer token, used when
+.B CGC_TOKEN
+is not set.
 .SH "EXIT STATUS"
 .TP
 .B 0
@@ -160,10 +178,10 @@ These checks are not a sandbox: as with
 .BR git-clone (1),
 do not run code from an untrusted repository without reviewing it.
 .SH LIMITATIONS
-No SSH, \fBgit://\fR, or local-path transports; no authentication, so private
-repositories are not supported; protocol v2 and SHA-1 only; the whole pack and
-all inflated objects are held in memory; no shallow or partial clone, LFS,
-hooks, or reflogs.
+No SSH, \fBgit://\fR, or local-path transports; protocol v2 and SHA-1 only;
+the whole pack and all inflated objects are held in memory, and a single object
+larger than 2 GiB is rejected; no partial clone, LFS, hooks, or reflogs; no
+retry or resume on network failures.
 .SH "SEE ALSO"
 .BR git-clone (1),
 .BR git-upload-pack (1),

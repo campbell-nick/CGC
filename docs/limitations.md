@@ -18,21 +18,23 @@
 ## Limitations (v1)
 
 - No SSH, `git://` or local-path transports.
-- HTTPS bearer-token authentication is supported (`--token`, `CGC_TOKEN`, `GIT_TOKEN`); SSH keys and other credential helpers are not.
+- HTTPS bearer-token authentication is supported (`--token`, `--token-file`,
+  `CGC_TOKEN`, `GIT_TOKEN`); SSH keys and other credential helpers are not.
 - Protocol v2 only; servers that only speak protocol v0/v1 are rejected.
 - SHA-1 repositories only (SHA-256 object format is detected and rejected).
-- The whole pack and all inflated objects are held in memory. Small and medium
-  repositories are fine; huge repositories need a streaming implementation.
+- The whole pack and all inflated objects are held in memory, and a single
+  object larger than 2 GiB is rejected. Small and medium repositories are fine;
+  huge repositories need a streaming implementation.
 - No partial/filtered clone, no submodule recursion (`--recursive`), no Git LFS,
   no hooks, no reflogs.
-
 - No retry or resume on network failures.
 
 ## Roadmap
 
 - Stream packfiles and objects to bound memory use
 - Keep the pack and write a `.idx` instead of exploding into loose objects
+- Incremental fetch, pull, and update of an existing clone
+- Connect/read timeouts, retries with backoff, and proxy support
 - Protocol v0 fallback and SSH transport
-- Credential/token authentication
-- Shallow and partial clone
+- Partial clone
 - Parallel batch cloning from a list or config

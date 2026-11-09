@@ -5,8 +5,10 @@
 #include "url.h"
 #include "util.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +35,8 @@ static void usage(FILE *out)
             "options:\n"
             "  --host <host>   default host for owner/repo (env CGC_DEFAULT_HOST)\n"
             "  --token <tok>   bearer token for HTTPS auth (env CGC_TOKEN/GIT_TOKEN)\n"
+            "  --token-file <path>\n"
+            "                 read the bearer token from the first line of <path>\n"
             "  -b, --branch <name>\n"
             "                 checkout <name> instead of the remote's default branch\n"
             "  --depth <n>     create a shallow clone with history truncated to n commits\n"
@@ -47,6 +51,63 @@ static void usage(FILE *out)
 static char *cleanup_path = NULL;
 static int cleanup_enabled = 0;
 static int cleanup_created = 0;
+
+/* Parse a strictly positive decimal integer, rejecting trailing junk and
+ * values that do not fit in an int. Returns 0 on success, -1 on failure. */
+static int parse_positive_int(const char *text, int *out)
+{
+    char *end = NULL;
+    long value;
+
+    errno = 0;
+    value = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0')
+        return -1;
+    if (value <= 0 || value > INT_MAX)
+        return -1;
+    *out = (int)value;
+    return 0;
+}
+
+/* Read a bearer token from the first line of path. Surrounding whitespace is
+ * trimmed so files created by editors or `echo` work as expected. Returns a
+ * heap-allocated token, or NULL if the file is missing, empty, or has an
+ * over-long first line. */
+static char *read_token_file(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    char buf[4096];
+    char *start;
+    char *end;
+    size_t len;
+
+    if (!f)
+        return NULL;
+    if (!fgets(buf, sizeof(buf), f)) {
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+
+    len = strlen(buf);
+    if (len == sizeof(buf) - 1 && buf[len - 1] != '\n') {
+        /* The first line is longer than we accept; do not silently truncate
+         * a credential. */
+        return NULL;
+    }
+
+    start = buf;
+    while (*start && isspace((unsigned char)*start))
+        start++;
+    end = start + strlen(start);
+    while (end > start && isspace((unsigned char)end[-1]))
+        end--;
+    *end = '\0';
+
+    if (!*start)
+        return NULL;
+    return xstrdup(start);
+}
 
 static void remove_tree(const char *path)
 {
@@ -107,6 +168,7 @@ int main(int argc, char **argv)
     const char *token = getenv("CGC_TOKEN");
     if (!token || !*token)
         token = getenv("GIT_TOKEN");
+    char *token_storage = NULL;
 
     int quiet = 0;
     const char *branch = NULL;
@@ -134,6 +196,14 @@ int main(int argc, char **argv)
             if (i + 1 >= argc)
                 die("--token requires an argument");
             token = argv[++i];
+        } else if (strcmp(a, "--token-file") == 0) {
+            if (i + 1 >= argc)
+                die("--token-file requires an argument");
+            free(token_storage);
+            token_storage = read_token_file(argv[++i]);
+            if (!token_storage)
+                die("cannot read a token from '%s'", argv[i]);
+            token = token_storage;
         } else if (strcmp(a, "-b") == 0 || strcmp(a, "--branch") == 0) {
             if (i + 1 >= argc)
                 die("--branch requires an argument");
@@ -141,8 +211,7 @@ int main(int argc, char **argv)
         } else if (strcmp(a, "--depth") == 0) {
             if (i + 1 >= argc)
                 die("--depth requires an argument");
-            depth = atoi(argv[++i]);
-            if (depth <= 0)
+            if (parse_positive_int(argv[++i], &depth) != 0)
                 die("--depth must be a positive integer");
         } else if (strcmp(a, "--single-branch") == 0) {
             single_branch = 1;
@@ -171,6 +240,7 @@ int main(int argc, char **argv)
     cgc_quiet = quiet;
 
     http_set_token(token);
+    free(token_storage);
 
     char *url;
     char *derived_name;

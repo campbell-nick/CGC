@@ -47,6 +47,20 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1
         run: make check test
 
+  static-analysis:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev libssl-dev pkg-config clang-tidy
+
+      - name: Analyze
+        run: make analyze
+
   macos:
     name: macOS
     runs-on: macos-latest

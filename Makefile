@@ -1,5 +1,6 @@
 CC         ?= cc
 PKG_CONFIG ?= pkg-config
+CLANG_TIDY ?= clang-tidy
 
 CFLAGS   ?= -O2 -g
 CPPFLAGS ?=
@@ -57,6 +58,14 @@ check: $(UNIT) $(PACKTEST)
 	./$(UNIT)
 	./tests/pack.sh
 
+# Curated clang-tidy checks: focus on real correctness and safety findings and
+# exclude the insecureAPI style checks, which flag ordinary memcpy/memset use.
+ANALYZE_CHECKS ?= -*,clang-analyzer-core.*,clang-analyzer-unix.*,clang-analyzer-security.*,-clang-analyzer-security.insecureAPI.*,clang-analyzer-deadcode.*
+
+analyze:
+	$(CLANG_TIDY) -checks='$(ANALYZE_CHECKS)' $(SRC) -- \
+		$(ALL_CPPFLAGS) $(ALL_CFLAGS)
+
 test: check cgc
 	./tests/smoke.sh
 
@@ -87,4 +96,4 @@ clean:
 distclean: clean
 	rm -rf dist
 
-.PHONY: all check clean dist distclean install test uninstall
+.PHONY: all analyze check clean dist distclean install test uninstall

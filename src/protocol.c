@@ -67,7 +67,7 @@ static int discover(const char *url, int *unborn_ok)
         ok = 1;
 
     /* Drain the capability advertisement. */
-    while ((kind = pkt_read(&pr, &line, &linelen)) == PKT_DATA) {
+    while (pkt_read(&pr, &line, &linelen) == PKT_DATA) {
         if (linelen >= 7 && memcmp(line, "ls-refs", 7) == 0 &&
             line_has(line, linelen, "unborn"))
             *unborn_ok = 1;
@@ -205,10 +205,9 @@ int protocol_ls_refs(const char *url, RemoteRefs *out)
     pkt_reader_init(&pr, resp.body.data, resp.body.len);
     const unsigned char *line;
     size_t linelen;
-    int kind;
     size_t cap = 0;
 
-    while ((kind = pkt_read(&pr, &line, &linelen)) == PKT_DATA) {
+    while (pkt_read(&pr, &line, &linelen) == PKT_DATA) {
         Ref ref;
         memset(&ref, 0, sizeof(ref));
         int unborn = parse_ref_line(line, linelen, &ref);

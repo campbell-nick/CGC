@@ -63,7 +63,8 @@ static int cmp_entry(const void *a, const void *b)
  * outside the working tree. */
 static int validate_index(Index *idx)
 {
-    qsort(idx->entries, idx->count, sizeof(IndexEntry), cmp_entry);
+    if (idx->count > 1)
+        qsort(idx->entries, idx->count, sizeof(IndexEntry), cmp_entry);
 
     for (size_t i = 0; i < idx->count; i++) {
         if (!path_is_safe_relative(idx->entries[i].path)) {
@@ -124,7 +125,8 @@ static int ensure_parents(const char *worktree, const char *rel)
 
 static void index_write(const char *gitdir, Index *idx)
 {
-    qsort(idx->entries, idx->count, sizeof(IndexEntry), cmp_entry);
+    if (idx->count > 1)
+        qsort(idx->entries, idx->count, sizeof(IndexEntry), cmp_entry);
 
     Buf b;
     buf_init(&b);

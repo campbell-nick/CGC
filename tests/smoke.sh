@@ -133,4 +133,30 @@ grep -q "You appear to have cloned an empty repository" <<<"$empty_out"
 test -f "$WORK/empty/.git/HEAD"
 grep -q "refs/heads/main" "$WORK/empty/.git/HEAD"
 
+# Invalid --depth values are rejected before any network access.
+for depth in 0 -1 abc 12x 999999999999999999999; do
+    if "$ROOT/cgc" --depth "$depth" gh:owner/repo "$WORK/bad-depth" \
+            >/dev/null 2>&1; then
+        echo "smoke: --depth '$depth' was accepted" >&2
+        exit 1
+    fi
+done
+test ! -e "$WORK/bad-depth"
+
+# --token-file must fail cleanly when the file is missing or empty.
+if "$ROOT/cgc" --token-file "$WORK/no-such-token" gh:owner/repo \
+        "$WORK/bad-token" >/dev/null 2>&1; then
+    echo "smoke: missing --token-file was accepted" >&2
+    exit 1
+fi
+: > "$WORK/empty-token"
+if "$ROOT/cgc" --token-file "$WORK/empty-token" gh:owner/repo \
+        "$WORK/bad-token" >/dev/null 2>&1; then
+    echo "smoke: empty --token-file was accepted" >&2
+    exit 1
+fi
+test ! -e "$WORK/bad-token"
+printf '  test-token  \nignored\n' > "$WORK/token"
+"$ROOT/cgc" --token-file "$WORK/token" --help >/dev/null
+
 echo "smoke test passed"

@@ -15,6 +15,11 @@ typedef struct {
     int resolved;
 } PackEntry;
 
+/* Refuse a single object larger than this (2 GiB) so a tiny compressed stream
+ * cannot make us allocate unbounded memory. Real Git objects above this size
+ * are rare and better handled by a streaming unpacker. */
+#define CGC_MAX_OBJECT_SIZE ((uint64_t)2 * 1024 * 1024 * 1024)
+
 typedef struct {
     uint32_t *slots; /* index + 1; 0 means empty */
     size_t cap;
@@ -168,6 +173,13 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir,
     uint32_t count = get_be32(pack + 8);
     if (version != 2 && version != 3)
         return -1;
+    /* Every entry needs at least one byte of header plus compressed data, so
+     * a count larger than the pack length is always malformed. Checking it
+     * before allocating avoids a huge allocation from a tiny hostile pack. */
+    if (count > len) {
+        warn_cgc("packfile object count is implausible");
+        return -1;
+    }
 
     /* Integrity: the last 20 bytes are the SHA-1 of the rest. */
     unsigned char digest[OID_RAW];
@@ -198,6 +210,11 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir,
             c = pack[pos++];
             size |= (uint64_t)(c & 0x7f) << shift;
             shift += 7;
+        }
+
+        if (size > SIZE_MAX || size > CGC_MAX_OBJECT_SIZE) {
+            warn_cgc("packfile object is too large");
+            goto fail;
         }
 
         if (type == OBJ_OFS_DELTA) {

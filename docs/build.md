@@ -72,6 +72,13 @@ make CC=clang \
      LDFLAGS="-fsanitize=address,undefined" check test
 ```
 
+Static analysis uses `clang-tidy` with a curated set of correctness and safety
+checks (the `insecureAPI` style checks are excluded):
+
+```sh
+make analyze
+```
+
 ## Release tarball
 
 ```sh
@@ -101,5 +108,6 @@ CI runs on every push and pull request:
 
 - GCC and Clang builds with `-Werror`, unit tests, and the smoke test
 - ASan + UBSan build and full test run
+- `clang-tidy` static analysis (`make analyze`)
 - macOS build and test with Homebrew OpenSSL
 - `make dist`, followed by a build and test from the extracted tarball
