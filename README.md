@@ -6,6 +6,8 @@
 
 [![CI](https://github.com/campbell-nick/cgc/actions/workflows/ci.yml/badge.svg)](https://github.com/campbell-nick/cgc/actions/workflows/ci.yml)
 
+Version: 0.1.0
+
 `cgc` is a self-contained implementation of `git clone` over the Git smart
 HTTP protocol (version 2). It does **not** shell out to `git`; it speaks the
 protocol itself, validates and unpacks the packfile, resolves deltas, writes
