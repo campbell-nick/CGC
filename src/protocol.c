@@ -481,7 +481,8 @@ static void delta_progress(void *ud, uint32_t done, uint32_t total)
 }
 
 int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
-                   int depth)
+                   int depth, const unsigned char (*haves)[OID_RAW],
+                   size_t nhaves)
 {
     if (refs->empty)
         return 0;
@@ -528,6 +529,13 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
         oid_hex(wants[i], hex);
         char line[64];
         snprintf(line, sizeof(line), "want %s\n", hex);
+        pkt_write_str(&req, line);
+    }
+    for (size_t i = 0; i < nhaves; i++) {
+        char hex[OID_HEX + 1];
+        oid_hex(haves[i], hex);
+        char line[64];
+        snprintf(line, sizeof(line), "have %s\n", hex);
         pkt_write_str(&req, line);
     }
     pkt_write_str(&req, "done\n");
@@ -596,6 +604,15 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
     buf_free(&demux.pending);
     buf_free(&demux.error);
 
+    if (pack.len == 0) {
+        /* The server had nothing to send because every want was already
+         * reachable from a have. This is success, not a malformed response. */
+        progress_clear();
+        buf_free(&pack);
+        free(demux.shallow);
+        return 0;
+    }
+
     if (pack.len < 12 || memcmp(pack.data, "PACK", 4) != 0) {
         warn_cgc("remote did not send a valid packfile");
         buf_free(&pack);
@@ -603,6 +620,14 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
     }
 
     uint32_t objects = get_be32(pack.data + 8);
+    if (objects == 0) {
+        /* An empty pack (header plus trailer) means there was nothing new.
+         * Do not print a receive/delta summary for a no-op fetch. */
+        progress_clear();
+        buf_free(&pack);
+        free(demux.shallow);
+        return 0;
+    }
     progress_receive_end(objects, pack.len);
 
     PackStats stats;

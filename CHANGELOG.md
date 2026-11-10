@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `cgc fetch [directory]` to download missing objects and update
+  remote-tracking refs and tags without touching local branches or the working
+  tree.
+- `cgc pull [directory]` and its `cgc update` alias to fetch, fast-forward the
+  current branch, and update the working tree and index.
+- `--branch` support for `fetch`, `pull`, and `update`, including fetching a
+  single branch. From a detached `HEAD`, `pull --branch` checks out the branch,
+  fast-forwarding it when possible and refusing divergence.
+- Fetch negotiation with `have` lines, so only objects missing from the local
+  clone are transferred.
+- End-to-end coverage for fetch, pull, the `update` alias, dirty-worktree
+  refusal, and non-fast-forward refusal.
+
+### Changed
+
+- Pull is fast-forward-only and preserves unchanged files. It refuses to
+  overwrite local modifications or untracked paths, and refuses to fetch into a
+  shallow clone.
+- An empty fetch pack is treated as "already up to date" instead of an error,
+  and no receive/delta summary is printed for a no-op fetch.
+
 ## [0.2.0] - 2026-11-09
 
 ### Added

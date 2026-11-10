@@ -12,10 +12,15 @@ Version: 0.2.0
 HTTP protocol (version 2). It does **not** shell out to `git`; it speaks the
 protocol itself, validates and unpacks the packfile, resolves deltas, writes
 loose objects and refs, checks out the working tree, and writes a Git index.
+It can also `fetch`, `pull`, and `update` an existing clone, negotiating with
+`have` lines and fast-forwarding the current branch.
 
 ```sh
 make
 ./cgc gh:octocat/Hello-World
+cd Hello-World
+../cgc fetch      # update remote-tracking refs
+../cgc pull       # fetch and fast-forward
 ```
 
 Install with `make install` (supports `PREFIX` and `DESTDIR`), or build a
@@ -24,16 +29,16 @@ release tarball with `make dist`. The version is tracked in `VERSION`.
 Verified against GitHub and against `git http-backend` with repositories that
 contain branches, annotated tags, nested trees, symlinks, executables and
 deltas (both `ofs-delta` and `ref-delta`). Clones pass `git fsck --full` and
-`git status` is clean. `make check` runs offline unit and pack tests;
-`make test` adds the end-to-end smoke test.
+`git status` is clean; pulls are verified the same way. `make check` runs
+offline unit and pack tests; `make test` adds the end-to-end smoke test.
 
 ## Documentation
 
 | Guide | Contents |
 | --- | --- |
 | [Build and test](docs/build.md) | Dependencies, building, installing, tests, releases, CI |
-| [Usage](docs/usage.md) | Repository forms, URL shorthands, options, output, safety, verifying a clone |
-| [Architecture](docs/architecture.md) | How cloning works and the source layout |
+| [Usage](docs/usage.md) | Repository forms, URL shorthands, options, fetch/pull, output, safety, verifying a clone |
+| [Architecture](docs/architecture.md) | How cloning, fetch, and pull work, and the source layout |
 | [Supported and limitations](docs/limitations.md) | What works today, v1 limitations, roadmap |
 
 ## License

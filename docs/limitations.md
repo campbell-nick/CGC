@@ -7,6 +7,10 @@
 - Branches, annotated tags, remote-tracking refs
 - `--branch`/`-b` to check out a branch or tag (detached HEAD for tags)
 - `--depth <n>` shallow clones (writes `.git/shallow`), with `--single-branch`
+- `fetch`, `pull`, and `update` for existing clones, using `have` lines so only
+  missing objects are transferred
+- Fast-forward-only pulls that preserve unchanged files and refuse to overwrite
+  local modifications or untracked paths
 - `ofs-delta` and `ref-delta` resolution, including delta chains
 - Nested trees, symlinks, executable files
 - Empty repositories (creates `.git` with the advertised default branch)
@@ -25,6 +29,18 @@
 - The whole pack and all inflated objects are held in memory, and a single
   object larger than 2 GiB is rejected. Small and medium repositories are fine;
   huge repositories need a streaming implementation.
+- Pull is fast-forward-only: no merge commits, rebase, or conflict resolution.
+  Diverged branches are refused.
+- Pull refuses to switch away from an existing branch, and refuses to fetch into
+  a shallow clone. From a detached `HEAD`, `pull --branch` switches to the
+  branch, fast-forwarding it when possible and refusing divergence.
+- Fetch does not prune remote-tracking refs for branches deleted upstream.
+- Pull reads `.git/index` (versions 2 and 3) to detect staged changes and
+  preserve stat data; other index versions are rejected.
+- Submodules are represented as empty directories; they are not cloned or
+  updated.
+- Remote tags are updated unconditionally, without Git's "would clobber
+  existing tag" check.
 - No partial/filtered clone, no submodule recursion (`--recursive`), no Git LFS,
   no hooks, no reflogs.
 - No retry or resume on network failures.
@@ -33,8 +49,9 @@
 
 - Stream packfiles and objects to bound memory use
 - Keep the pack and write a `.idx` instead of exploding into loose objects
-- Incremental fetch, pull, and update of an existing clone
+- Merge/rebase support and shallow fetch (`--deepen`)
 - Connect/read timeouts, retries with backoff, and proxy support
 - Protocol v0 fallback and SSH transport
 - Partial clone
+- Submodule clone and update
 - Parallel batch cloning from a list or config

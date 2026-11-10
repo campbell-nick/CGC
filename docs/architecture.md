@@ -25,11 +25,35 @@
    executable bits and submodule mount points, then writes a DIRC version 2
    index so Git sees a clean working tree.
 
+## Incremental fetch and pull
+
+`cgc fetch` and `cgc pull` reuse the same protocol and pack layers with a
+different flow (`update.c`):
+
+1. **Locate the repository** — walk up from the given directory (default `.`)
+   until a `.git` directory or gitfile is found, and read the `origin` URL from
+   `.git/config`.
+2. **Negotiate** — list refs as before, then send `command=fetch` with a `want`
+   for each remote ref and `have` lines for every local ref, branch and tag.
+   The server sends only objects reachable from the wants but not the haves.
+3. **Unpack** — the same pack reader writes the new objects. An empty pack
+   means the clone was already up to date.
+4. **Fetch bookkeeping** — rewrite `refs/remotes/origin/*` and tags. Local
+   branches and the worktree are untouched.
+5. **Fast-forward check** (`pull` only) — walk the new commit's parents to
+   confirm the local branch tip is an ancestor. Merges and rebases are not
+   supported.
+6. **Worktree update** (`pull` only) — `checkout_update` compares the old and
+   new trees. Unchanged files are left alone; changed and deleted files must
+   still match the old blob, and added paths must not collide with untracked
+   files. It then writes the new index and advances the local branch and
+   `HEAD`.
+
 ## Source layout
 
 ```
 src/
-  main.c       CLI, shorthand parsing, clone orchestration
+  main.c       CLI, shorthand parsing, clone and subcommand dispatch
   url.c        URL parsing and shorthand resolution
   http.c       HTTP/1.1 over TCP + OpenSSL, chunked bodies, redirects
   pktline.c    Git pkt-line framing
@@ -37,7 +61,8 @@ src/
   progress.c   Git-style status output and progress meters
   pack.c       packfile parsing, delta resolution
   odb.c        loose object read/write and hashing
-  repo.c       .git skeleton, config, refs, HEAD
-  checkout.c   tree walking, working tree, DIRC index
+  repo.c       .git skeleton, config, refs, HEAD, local object discovery
+  checkout.c   tree walking, working tree, DIRC index, incremental updates
+  update.c     fetch, fast-forward pull, and worktree orchestration
   util.c       buffers, SHA-1, zlib, filesystem helpers
 ```

@@ -2,6 +2,7 @@
 #include "http.h"
 #include "protocol.h"
 #include "repo.h"
+#include "update.h"
 #include "url.h"
 #include "util.h"
 
@@ -45,7 +46,12 @@ static void usage(FILE *out)
             "                 fetch all branches (default unless --depth is given)\n"
             "  -q, --quiet     suppress progress messages\n"
             "  -h, --help      show this help\n"
-            "  -V, --version   show version\n");
+            "  -V, --version   show version\n"
+            "\n"
+            "subcommands (run in an existing clone):\n"
+            "  cgc fetch [options] [directory]   fetch remote updates\n"
+            "  cgc pull  [options] [directory]   fetch and fast-forward the current branch\n"
+            "  cgc update [options] [directory]  alias for pull\n");
 }
 
 static char *cleanup_path = NULL;
@@ -109,6 +115,98 @@ static char *read_token_file(const char *path)
     return xstrdup(start);
 }
 
+static void update_usage(FILE *out, int pull)
+{
+    fprintf(out,
+            "usage: cgc %s [options] [directory]\n"
+            "\n"
+            "%s %s from the origin remote in an existing clone.\n"
+            "\n"
+            "options:\n"
+            "  -q, --quiet     suppress status output\n"
+            "  --token <tok>   bearer token for HTTPS auth (env CGC_TOKEN/GIT_TOKEN)\n"
+            "  --token-file <path>\n"
+            "                  read the bearer token from the first line of <path>\n"
+            "  -b, --branch <name>\n"
+            "                  %s\n"
+            "  -h, --help      show this help\n"
+            "  -V, --version   show version\n"
+            "\n"
+            "directory defaults to the current directory. Parent directories are\n"
+            "searched for the repository.\n",
+            pull ? "pull|update" : "fetch",
+            pull ? "Pull" : "Fetch",
+            pull ? "fetches and fast-forwards" : "fetches updates",
+            pull ? "update and check out <name> instead of the current branch"
+                 : "fetch only <name> (tags are still fetched)");
+}
+
+static int run_subcommand(int argc, char **argv, int pull)
+{
+    const char *token = getenv("CGC_TOKEN");
+    if (!token || !*token)
+        token = getenv("GIT_TOKEN");
+    char *token_storage = NULL;
+
+    int quiet = 0;
+    const char *branch = NULL;
+    const char *dir = ".";
+    int have_dir = 0;
+
+    for (int i = 2; i < argc; i++) {
+        const char *a = argv[i];
+        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
+            update_usage(stdout, pull);
+            free(token_storage);
+            return 0;
+        } else if (strcmp(a, "-V") == 0 || strcmp(a, "--version") == 0) {
+            printf("cgc %s\n", CGC_VERSION);
+            free(token_storage);
+            return 0;
+        } else if (strcmp(a, "-q") == 0 || strcmp(a, "--quiet") == 0) {
+            quiet = 1;
+        } else if (strcmp(a, "--token") == 0) {
+            if (i + 1 >= argc)
+                die("--token requires an argument");
+            token = argv[++i];
+        } else if (strcmp(a, "--token-file") == 0) {
+            if (i + 1 >= argc)
+                die("--token-file requires an argument");
+            free(token_storage);
+            token_storage = read_token_file(argv[++i]);
+            if (!token_storage)
+                die("cannot read a token from '%s'", argv[i]);
+            token = token_storage;
+        } else if (strcmp(a, "-b") == 0 || strcmp(a, "--branch") == 0) {
+            if (i + 1 >= argc)
+                die("--branch requires an argument");
+            branch = argv[++i];
+        } else if (strcmp(a, "--depth") == 0) {
+            die("--depth is only valid when cloning");
+        } else if (strcmp(a, "--") == 0) {
+            for (i++; i < argc; i++) {
+                if (have_dir)
+                    die("too many arguments");
+                dir = argv[i];
+                have_dir = 1;
+            }
+        } else if (a[0] == '-' && a[1] != 0) {
+            die("unknown option: %s", a);
+        } else {
+            if (have_dir)
+                die("too many arguments");
+            dir = a;
+            have_dir = 1;
+        }
+    }
+
+    cgc_quiet = quiet;
+    http_set_token(token);
+    free(token_storage);
+
+    return update_run(dir, branch, pull) == 0 ? 0 : 1;
+}
+
 static void remove_tree(const char *path)
 {
     struct stat st;
@@ -160,6 +258,12 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
+
+    if (argc >= 2 && strcmp(argv[1], "fetch") == 0)
+        return run_subcommand(argc, argv, 0);
+    if (argc >= 2 && (strcmp(argv[1], "pull") == 0 ||
+                      strcmp(argv[1], "update") == 0))
+        return run_subcommand(argc, argv, 1);
 
     const char *host = getenv("CGC_DEFAULT_HOST");
     if (!host || !*host)
@@ -401,7 +505,7 @@ int main(int argc, char **argv)
     }
 
     if (!refs.empty) {
-        if (protocol_fetch(url, &refs, gitdir, depth) != 0) {
+        if (protocol_fetch(url, &refs, gitdir, depth, NULL, 0) != 0) {
             remote_refs_free(&refs);
             die("fetch failed");
         }

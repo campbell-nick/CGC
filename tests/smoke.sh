@@ -159,4 +159,120 @@ test ! -e "$WORK/bad-token"
 printf '  test-token  \nignored\n' > "$WORK/token"
 "$ROOT/cgc" --token-file "$WORK/token" --help >/dev/null
 
+# ---------------------------------------------------------------------------
+# fetch / pull / update
+# ---------------------------------------------------------------------------
+cd "$WORK/clone"
+
+printf 'hello again\n' > "$WORK/src/README.md"
+printf 'pulled\n' > "$WORK/src/pulled.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "upstream change"
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+NEW_HEAD=$(git -C "$WORK/src" rev-parse HEAD)
+OLD_HEAD=$(git rev-parse HEAD)
+
+# fetch updates remote-tracking refs but not HEAD or the worktree.
+"$ROOT/cgc" fetch -q
+test "$(git rev-parse refs/remotes/origin/main)" = "$NEW_HEAD"
+test "$(git rev-parse HEAD)" = "$OLD_HEAD"
+test ! -e pulled.txt
+
+# pull fast-forwards HEAD and the worktree.
+"$ROOT/cgc" pull -q
+test "$(git rev-parse HEAD)" = "$NEW_HEAD"
+test "$(cat README.md)" = "hello again"
+test -f pulled.txt
+git fsck --full
+test -z "$(git status --porcelain)"
+
+# A dirty worktree is not overwritten.
+printf 'upstream dirty\n' > "$WORK/src/README.md"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "dirty upstream"
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+DIRTY_HEAD=$(git -C "$WORK/src" rev-parse HEAD)
+printf 'local dirty\n' > README.md
+if "$ROOT/cgc" pull -q >/dev/null 2>&1; then
+    echo "smoke: pull overwrote a dirty worktree" >&2
+    exit 1
+fi
+test "$(cat README.md)" = "local dirty"
+test "$(git rev-parse HEAD)" = "$NEW_HEAD"
+git checkout -- README.md
+"$ROOT/cgc" pull -q
+test "$(cat README.md)" = "upstream dirty"
+test "$(git rev-parse HEAD)" = "$DIRTY_HEAD"
+
+# Local modifications to unaffected files survive a pull and stay visible.
+printf 'local edit\n' >> run.sh
+printf 'unaffected\n' > "$WORK/src/unaffected.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "unaffected commit"
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+UNAFFECTED_HEAD=$(git -C "$WORK/src" rev-parse HEAD)
+"$ROOT/cgc" pull -q
+test "$(git rev-parse HEAD)" = "$UNAFFECTED_HEAD"
+test -f unaffected.txt
+grep -q 'local edit' run.sh
+test "$(git status --porcelain)" = " M run.sh"
+git checkout -- run.sh
+test -z "$(git status --porcelain)"
+
+# Staged changes are refused rather than mixed with the update.
+printf 'staged\n' >> run.sh
+git add run.sh
+printf 'staged upstream\n' > "$WORK/src/unaffected.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "staged upstream"
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+if "$ROOT/cgc" pull -q >/dev/null 2>&1; then
+    echo "smoke: pull accepted staged changes" >&2
+    exit 1
+fi
+test "$(git rev-parse HEAD)" = "$UNAFFECTED_HEAD"
+test "$(cat unaffected.txt)" = unaffected
+git reset -q HEAD run.sh
+git checkout -- run.sh
+"$ROOT/cgc" pull -q
+test "$(cat unaffected.txt)" = "staged upstream"
+
+# update is an alias for pull.
+printf 'alias\n' > "$WORK/src/alias.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "alias commit"
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+ALIAS_HEAD=$(git -C "$WORK/src" rev-parse HEAD)
+"$ROOT/cgc" update -q
+test "$(git rev-parse HEAD)" = "$ALIAS_HEAD"
+test -f alias.txt
+test -z "$(git status --porcelain)"
+
+# A non-fast-forward is refused and leaves HEAD alone.
+git -C "$WORK/src" reset -q --hard HEAD~1
+printf 'divergent\n' > "$WORK/src/divergent.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m divergent
+git -C "$WORK/src" push -q -f "$WORK/server/repo.git" main
+if "$ROOT/cgc" pull -q >/dev/null 2>&1; then
+    echo "smoke: pull accepted a non-fast-forward" >&2
+    exit 1
+fi
+test "$(git rev-parse HEAD)" = "$ALIAS_HEAD"
+test ! -e divergent.txt
+
+# --branch limits a fetch to that branch (plus tags).
+"$ROOT/cgc" fetch -q --branch dev
+test "$(git rev-parse refs/remotes/origin/dev)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/dev)"
+
+# Pull --branch from a detached HEAD checks out the branch.
+git checkout -q --detach HEAD
+"$ROOT/cgc" pull -q --branch dev
+test "$(git symbolic-ref HEAD)" = refs/heads/dev
+test -f dev.txt
+test -z "$(git status --porcelain)"
+
+cd "$ROOT"
+
 echo "smoke test passed"

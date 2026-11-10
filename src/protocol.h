@@ -26,8 +26,11 @@ void remote_refs_free(RemoteRefs *r);
 int protocol_ls_refs(const char *url, RemoteRefs *out);
 
 /* Fetch the pack needed for all refs and unpack it into the object db.
- * If depth > 0, perform a shallow fetch of that depth and write .git/shallow. */
+ * If depth > 0, perform a shallow fetch of that depth and write .git/shallow.
+ * haves/nhaves are object ids the client already has; they let the server
+ * omit objects reachable from them. Pass NULL/0 for a fresh clone. */
 int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
-                   int depth);
+                   int depth, const unsigned char (*haves)[OID_RAW],
+                   size_t nhaves);
 
 #endif

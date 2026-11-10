@@ -1,9 +1,18 @@
 .TH CGC 1 "2026-11-09" "cgc 0.2.0" "User Commands"
 .SH NAME
-cgc \- clone a Git repository over smart HTTP
+cgc \- clone, fetch, pull, and update a Git repository over smart HTTP
 .SH SYNOPSIS
 .B cgc
 [\fIOPTIONS\fR] \fIREPOSITORY\fR [\fIDIRECTORY\fR]
+.br
+.B cgc fetch
+[\fIOPTIONS\fR] [\fIDIRECTORY\fR]
+.br
+.B cgc pull
+[\fIOPTIONS\fR] [\fIDIRECTORY\fR]
+.br
+.B cgc update
+[\fIOPTIONS\fR] [\fIDIRECTORY\fR]
 .SH DESCRIPTION
 .B cgc
 is a self-contained implementation of
@@ -13,12 +22,26 @@ It downloads the packfile, verifies and unpacks it, resolves deltas, writes
 loose objects, refs and configuration, and checks out the working tree with a
 Git-compatible index.
 .PP
+The
+.BR fetch ,
+.B pull
+and
+.B update
+subcommands update an existing clone.
+.B fetch
+downloads missing objects and updates remote-tracking refs and tags.
+.B pull
+(and its alias
+.BR update )
+also fast-forwards the current branch and updates the working tree.
+.PP
 If
 .I DIRECTORY
-is omitted, the directory name is derived from the repository name, with any
-trailing
+is omitted for a clone, the directory name is derived from the repository name,
+with any trailing
 .B .git
-removed.
+removed. For subcommands it defaults to the current directory, and parent
+directories are searched for the repository.
 .SH "REPOSITORY FORMS"
 .TP
 .B https://\fIhost\fR/\fIowner\fR/\fIrepo\fR[.git]
@@ -55,6 +78,36 @@ or
 .B \fIhost.tld\fR/\fIowner\fR/\fIrepo\fR
 Expands to
 .BR https://\fIhost.tld\fR/\fIowner\fR/\fIrepo\fR.git .
+.SH SUBCOMMANDS
+.TP
+.B fetch
+Fetch missing objects and update
+.B refs/remotes/origin/*
+and tags. Local branches and the working tree are left untouched.
+.TP
+.B pull
+Fetch, then fast-forward the current branch and update the working tree and
+index. Refuses to run when the remote branch is not a descendant of the local
+branch, when an affected file has local modifications, or when an untracked
+path would be overwritten.
+.TP
+.B update
+Alias for
+.BR pull .
+.PP
+For all subcommands,
+.I DIRECTORY
+defaults to the current directory and parent directories are searched for the
+repository.
+.B \-\-branch
+selects the branch to fetch or pull. Pull refuses to switch away from an
+existing branch, but can create and check out a branch when
+.B HEAD
+is unborn or detached. From a detached
+.BR HEAD ,
+.B pull
+switches to the branch, fast-forwarding it when possible, keeping the local tip
+when it is ahead, and refusing when local and remote have diverged.
 .SH OPTIONS
 .TP
 .B \-\-host \fIhost\fR
@@ -62,7 +115,7 @@ Use
 .I host
 as the default host for the
 .IR owner/repo
-shorthand.
+shorthand. Clone only.
 .TP
 .B \-\-token \fItok\fR
 Use
@@ -78,13 +131,17 @@ environment variables. Tokens are never written to
 Read the bearer token from the first line of
 .IR path ,
 trimming surrounding whitespace. This keeps the token out of the process
-argument list. The file is read before the clone starts.
+argument list. The file is read before the operation starts.
 .TP
 .BR \-b ", " \-\-branch " \fIname\fR"
-Check out
+When cloning, check out
 .I name
 (a branch or tag) instead of the remote's default branch. Tags are checked
 out in detached HEAD state.
+When fetching or pulling, limit the operation to
+.I name
+(tags are still fetched by
+.BR fetch ).
 .TP
 .B \-\-depth \fIn\fR
 Create a shallow clone with history truncated to
@@ -93,14 +150,15 @@ commits. Writes
 .B .git/shallow
 with the shallow boundary. Implies
 .BR \-\-single\-branch .
+Clone only.
 .TP
 .B \-\-single\-branch
-Clone only the history of one branch.
+Clone only the history of one branch. Clone only.
 .TP
 .B \-\-no\-single\-branch
 Fetch all branches (the default unless
 .B \-\-depth
-is given).
+is given). Clone only.
 .TP
 .BR \-q ", " \-\-quiet
 Suppress progress messages and status output.
@@ -121,6 +179,9 @@ cgc octocat/Hello-World my-copy
 cgc https://github.com/torvalds/linux.git
 cgc \-\-host git.example.com team/repo
 CGC_DEFAULT_HOST=git.example.com cgc team/repo
+cd repo && cgc fetch
+cd repo && cgc pull
+cgc pull \-\-branch main /path/to/repo
 .fi
 .SH OUTPUT
 Status is written to standard error in the style of
@@ -135,6 +196,18 @@ download meter,
 and
 .B Updating files
 during checkout.
+.B fetch
+prints a
+.B From
+block listing new and updated branches and tags.
+.B pull
+also prints
+.B Updating
+and
+.BR Fast-forward ,
+or
+.B Already up to date.
+when there is nothing to do.
 Live meters are drawn only when standard error is a terminal; final summary
 lines are printed when output is redirected.
 .SH ENVIRONMENT
@@ -160,10 +233,10 @@ is not set.
 .SH "EXIT STATUS"
 .TP
 .B 0
-The repository was cloned successfully.
+The operation completed successfully.
 .TP
 .B 1
-A network, protocol, filesystem, or checkout error occurred.
+A network, protocol, filesystem, checkout, or fast-forward error occurred.
 .TP
 .B 2
 The command line was invalid.
@@ -174,14 +247,26 @@ targets supplied by the server are validated before use, configuration values
 are rejected if they contain control characters, and checkout refuses duplicate
 paths, file/directory collisions, and paths whose existing parent is a symlink.
 This prevents a malicious repository from writing outside the target directory.
+.PP
+.B pull
+checks the working tree before changing it: an affected file must still match
+the old commit, and an added path must not already exist as an untracked file.
+If either check fails, nothing is written. Pull never creates a merge commit or
+rebases.
+.PP
 These checks are not a sandbox: as with
 .BR git-clone (1),
 do not run code from an untrusted repository without reviewing it.
 .SH LIMITATIONS
 No SSH, \fBgit://\fR, or local-path transports; protocol v2 and SHA-1 only;
 the whole pack and all inflated objects are held in memory, and a single object
-larger than 2 GiB is rejected; no partial clone, LFS, hooks, or reflogs; no
-retry or resume on network failures.
+larger than 2 GiB is rejected; pull is fast-forward-only (no merge, rebase, or
+conflict resolution); pull cannot fetch into a shallow clone or switch away from
+an existing branch (from a detached HEAD it can check out a branch when that is
+a fast-forward or the local tip is ahead); fetch does not prune remote-tracking
+refs for branches deleted upstream; submodules are not cloned or updated; remote
+tags are updated without Git's clobber check; no partial clone, LFS, hooks, or
+reflogs; no retry or resume on network failures.
 .SH "SEE ALSO"
 .BR git-clone (1),
 .BR git-upload-pack (1),

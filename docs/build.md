@@ -60,8 +60,9 @@ with history, deltas, branches, annotated and lightweight tags, a symlink, an
 executable, and non-ASCII and space-containing filenames. It serves the
 repository with `git http-backend` using both `Content-Length` and chunked
 transfer encoding, clones it with `cgc`, and verifies the result with `git
-fsck`, `git status`, and ref comparisons. It also checks `--quiet` and cloning
-an empty repository.
+fsck`, `git status`, and ref comparisons. It also checks `--quiet`, cloning an
+empty repository, fetch/pull/update, and the refusal paths for a dirty worktree
+and a non-fast-forward update.
 
 Sanitizer builds can be run locally:
 

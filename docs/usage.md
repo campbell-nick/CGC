@@ -33,6 +33,32 @@ cgc --host git.example.com team/repo
 CGC_DEFAULT_HOST=git.example.com cgc team/repo
 ```
 
+## Subcommands
+
+```
+cgc fetch  [options] [directory]
+cgc pull   [options] [directory]
+cgc update [options] [directory]
+```
+
+`fetch` downloads new objects and updates `refs/remotes/origin/*` and tags
+without touching local branches or the working tree. `pull` (and its alias
+`update`) does the same, then fast-forwards the current branch and updates the
+working tree and index. `directory` defaults to the current directory; parent
+directories are searched for the repository.
+
+Pull is fast-forward-only. It refuses when the remote branch is not a
+descendant of the local branch, when an affected file has local modifications,
+or when an untracked path would be overwritten. Fetching into a shallow clone
+is not supported yet.
+
+`--branch <name>` limits `fetch` to that branch (tags are still fetched) and
+selects the branch for `pull`/`update`. Pull refuses to switch away from an
+existing branch; check out the target branch first. It can create and check out
+a branch when `HEAD` is unborn or detached. From a detached `HEAD` it switches
+to the branch, fast-forwarding it when possible, keeping the local tip when it
+is ahead, and refusing when local and remote have diverged.
+
 ## Options
 
 ```
@@ -41,8 +67,9 @@ CGC_DEFAULT_HOST=git.example.com cgc team/repo
 --token-file <path>
                 read the bearer token from the first line of <path>
 -b, --branch <name>
-                check out <name> (branch or tag) instead of the remote's
-                default branch; tags are checked out in detached HEAD state
+                clone: check out <name> (branch or tag) instead of the
+                remote's default branch; tags use a detached HEAD
+                fetch/pull: limit or select the branch (see Subcommands)
 --depth <n>     create a shallow clone with history truncated to n commits
 --single-branch clone only the history of one branch
 --no-single-branch
@@ -52,6 +79,9 @@ CGC_DEFAULT_HOST=git.example.com cgc team/repo
 -V, --version   show version
 ```
 
+`--host`, `--depth`, `--single-branch`, and `--no-single-branch` are only
+valid for cloning.
+
 ## Output
 
 Status is written to stderr in the same style as `git clone`: `Cloning into
@@ -59,6 +89,10 @@ Status is written to stderr in the same style as `git clone`: `Cloning into
 download meter, `Resolving deltas`, and `Updating files` during checkout. Live
 meters are drawn on a terminal; a final summary line is printed when output is
 redirected. `--quiet` suppresses all of it.
+
+`fetch` prints a `From <url>` block listing new and updated branches and tags.
+`pull` additionally prints `Updating <old>..<new>` and `Fast-forward`, or
+`Already up to date.` when there is nothing to do.
 
 ## Safety
 
@@ -68,6 +102,11 @@ redirected. `--quiet` suppresses all of it.
 refuses trees with duplicate paths, file/directory collisions, or paths whose
 existing parent is a symlink. This prevents a malicious repository from
 escaping the target directory or injecting configuration.
+
+`pull` checks the worktree before changing it: an affected file must still
+match the old commit, and an added path must not already exist as an untracked
+file. If either check fails, nothing is written. Pull never creates a merge
+commit or rebases.
 
 These checks protect the clone destination; they are not a sandbox. As with
 `git clone`, do not run code from an untrusted repository, and review hooks and
