@@ -9,7 +9,8 @@
 Version: 0.2.0
 
 `cgc` is a self-contained implementation of `git clone` over the Git smart
-HTTP protocol (version 2). It does **not** shell out to `git`; it speaks the
+HTTP protocol (version 2, with a protocol v0 fallback for older servers). It
+does **not** shell out to `git`; it speaks the
 protocol itself, validates and unpacks the packfile, resolves deltas, writes
 loose objects and refs, checks out the working tree, and writes a Git index.
 It can also `fetch`, `pull`, and `update` an existing clone, negotiating with

@@ -17,8 +17,8 @@ cgc \- clone, fetch, pull, and update Git repositories
 .B cgc
 is a self-contained implementation of
 .BR git-clone (1)
-that speaks the Git smart HTTP protocol (version 2) directly, and can also read
-a local repository without invoking
+that speaks the Git smart HTTP protocol (version 2, with a protocol v0
+fallback) directly, and can also read a local repository without invoking
 .BR git (1).
 It downloads or copies objects, verifies and unpacks packfiles, resolves deltas,
 writes loose objects, refs and configuration, and checks out the working tree
@@ -385,9 +385,10 @@ These checks are not a sandbox: as with
 .BR git-clone (1),
 do not run code from an untrusted repository without reviewing it.
 .SH LIMITATIONS
-No SSH or \fBgit://\fR transport; protocol v2 and SHA-1 only; the whole pack and
-all inflated objects are held in memory, and a single object larger than 2 GiB
-is rejected; local transfers copy every object instead of using
+No SSH or \fBgit://\fR transport; protocol v2 with a v0 fallback and SHA-1
+only; the whole pack and all inflated objects are held in memory, and a single
+object larger than 2 GiB is rejected; local transfers copy every object instead
+of using
 .B have
 negotiation, and
 .B \-\-depth

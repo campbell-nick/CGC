@@ -2,7 +2,8 @@
 
 ## Supported
 
-- Smart HTTP protocol v2 over HTTPS (plain HTTP is accepted for local testing)
+- Smart HTTP protocol v2 over HTTPS, with a protocol v0 fallback for servers
+  that do not advertise v2 (plain HTTP is accepted for local testing)
 - Local-path and `file://` transports, including bare repositories, linked
   worktrees (`.git` files and `commondir`), packed refs, and source packfiles
 - Redirects, chunked transfer encoding, and verified TLS
@@ -38,7 +39,8 @@
   packfiles are unpacked into loose objects rather than copied as packs.
 - HTTPS bearer-token authentication is supported (`--token`, `--token-file`,
   `CGC_TOKEN`, `GIT_TOKEN`); SSH keys and other credential helpers are not.
-- Protocol v2 only; servers that only speak protocol v0/v1 are rejected.
+- Protocol v0 fallback covers the common smart-HTTP upload-pack flow; protocol
+  v1 (a v0/v2 hybrid) is not implemented.
 - SHA-1 repositories only (SHA-256 object format is detected and rejected).
 - The whole pack and all inflated objects are held in memory, and a single
   object larger than 2 GiB is rejected. Small and medium repositories are fine;

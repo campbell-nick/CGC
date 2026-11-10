@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Tiny smart-HTTP server backed by `git http-backend`, used by smoke.sh.
 
-usage: serve-http.py <git-project-root> <port> [length|chunked]
+usage: serve-http.py <git-project-root> <port> [length|chunked|v0]
 
 The optional third argument selects how response bodies are framed. The
-default is Content-Length; "chunked" exercises cgc's chunked decoder.
+default is Content-Length; "chunked" exercises cgc's chunked decoder, and
+"v0" hides the Git-Protocol header so git http-backend falls back to
+protocol v0.
 """
 import os
 import subprocess
@@ -50,7 +52,8 @@ class Handler(BaseHTTPRequestHandler):
             "REMOTE_ADDR": self.client_address[0],
             "SERVER_PROTOCOL": self.protocol_version,
             "GATEWAY_INTERFACE": "CGI/1.1",
-            "HTTP_GIT_PROTOCOL": self.headers.get("Git-Protocol", ""),
+            "HTTP_GIT_PROTOCOL":
+                "" if MODE == "v0" else self.headers.get("Git-Protocol", ""),
         })
         p = subprocess.run(["git", "http-backend"], input=body, env=env,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -93,6 +96,6 @@ if __name__ == "__main__":
     if len(sys.argv) not in (3, 4):
         sys.exit("usage: serve-http.py <git-project-root> <port> "
                  "[length|chunked]")
-    if MODE not in ("length", "chunked"):
-        sys.exit("serve-http.py: mode must be length or chunked")
+    if MODE not in ("length", "chunked", "v0"):
+        sys.exit("serve-http.py: mode must be length, chunked, or v0")
     ThreadingHTTPServer(("127.0.0.1", int(sys.argv[2])), Handler).serve_forever()

@@ -39,6 +39,10 @@ All notable changes to this project are documented here. The format follows
   destination.
 - Annotated tags selected with `--branch` from a local repository are peeled to
   their commit before checkout.
+- Protocol v0 fallback for smart HTTP servers that do not advertise protocol
+  v2, including v0 ref advertisement parsing (peeled tags, `symref=HEAD`,
+  empty-repository pseudo-refs), sideband demultiplexing with a raw-pack
+  fallback, shallow `--depth` fetches, and `have`-line negotiation.
 - `--prune` to delete remote-tracking refs for branches deleted upstream,
   including entries in `packed-refs`.
 - `.git/FETCH_HEAD` for fetch and pull, and `.git/ORIG_HEAD` before a pull
@@ -51,6 +55,8 @@ All notable changes to this project are documented here. The format follows
 - End-to-end coverage for local clone, bare and `file://` sources, local
   `--bare`/`--no-tags`/`--origin`, local pull and bare fetch, linked worktrees,
   and local `--depth` rejection.
+- End-to-end coverage for protocol v0 clone, peeled tags, shallow clones, empty
+  repositories, fetch, and pull.
 
 ### Changed
 

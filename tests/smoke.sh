@@ -8,12 +8,15 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 WORK=$(mktemp -d)
 PORT=${PORT:-$((8000 + RANDOM % 500))}
 PORT2=$((PORT + 500))
+PORT3=$((PORT + 1000))
 SERVER_PID=
 CHUNKED_PID=
+V0_PID=
 
 cleanup() {
     [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
     [[ -n "$CHUNKED_PID" ]] && kill "$CHUNKED_PID" 2>/dev/null || true
+    [[ -n "$V0_PID" ]] && kill "$V0_PID" 2>/dev/null || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -62,10 +65,15 @@ SERVER_PID=$!
 python3 "$ROOT/tests/serve-http.py" "$WORK/server" "$PORT2" chunked \
     >/dev/null 2>&1 &
 CHUNKED_PID=$!
+python3 "$ROOT/tests/serve-http.py" "$WORK/server" "$PORT3" v0 \
+    >/dev/null 2>&1 &
+V0_PID=$!
 
 URL="http://127.0.0.1:$PORT/repo.git"
 URL2="http://127.0.0.1:$PORT2/repo.git"
+URL3="http://127.0.0.1:$PORT3/repo.git"
 EMPTY_URL="http://127.0.0.1:$PORT/empty.git"
+EMPTY_URL3="http://127.0.0.1:$PORT3/empty.git"
 
 wait_ready() {
     for _ in $(seq 1 50); do
@@ -77,7 +85,7 @@ wait_ready() {
     return 1
 }
 
-if ! wait_ready "$URL" || ! wait_ready "$URL2"; then
+if ! wait_ready "$URL" || ! wait_ready "$URL2" || ! wait_ready "$URL3"; then
     echo "smoke: test server did not start" >&2
     exit 1
 fi
@@ -346,6 +354,51 @@ test -f dev.txt
 test -z "$(git status --porcelain)"
 
 cd "$ROOT"
+
+# ---------------------------------------------------------------------------
+# protocol v0 fallback
+# ---------------------------------------------------------------------------
+"$ROOT/cgc" -q "$URL3" "$WORK/v0clone"
+git -C "$WORK/v0clone" fsck --full
+test -z "$(git -C "$WORK/v0clone" status --porcelain)"
+test "$(git -C "$WORK/v0clone" rev-parse HEAD)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/main)"
+test "$(git -C "$WORK/v0clone" rev-parse refs/remotes/origin/dev)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/dev)"
+test "$(git -C "$WORK/v0clone" rev-parse refs/tags/v1)" = \
+     "$(git -C "$WORK/src" rev-parse refs/tags/v1)"
+
+# v0 peeled tags and detached checkout from --branch.
+"$ROOT/cgc" -q --branch v1 "$URL3" "$WORK/v0tag"
+test "$(git -C "$WORK/v0tag" rev-parse HEAD)" = \
+     "$(git -C "$WORK/src" rev-parse 'v1^{commit}')"
+test -z "$(git -C "$WORK/v0tag" symbolic-ref -q HEAD)"
+
+# v0 shallow clone writes .git/shallow and truncates history.
+"$ROOT/cgc" -q --depth 1 "$URL3" "$WORK/v0depth"
+test -f "$WORK/v0depth/.git/shallow"
+test "$(git -C "$WORK/v0depth" rev-list --count HEAD)" = 1
+git -C "$WORK/v0depth" fsck --full
+test -z "$(git -C "$WORK/v0depth" status --porcelain)"
+
+# v0 empty repository.
+empty_out=$("$ROOT/cgc" "$EMPTY_URL3" "$WORK/v0empty" 2>&1)
+grep -q "You appear to have cloned an empty repository" <<<"$empty_out"
+
+# v0 fetch and pull use have negotiation and update refs/worktree.
+printf 'v0 fetch\n' > "$WORK/src/v0-fetch.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "v0 fetch"
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+V0_HEAD=$(git -C "$WORK/src" rev-parse HEAD)
+(cd "$WORK/v0clone" && "$ROOT/cgc" fetch -q)
+test "$(git -C "$WORK/v0clone" rev-parse refs/remotes/origin/main)" = "$V0_HEAD"
+test ! -e "$WORK/v0clone/v0-fetch.txt"
+(cd "$WORK/v0clone" && "$ROOT/cgc" pull -q)
+test "$(git -C "$WORK/v0clone" rev-parse HEAD)" = "$V0_HEAD"
+test -f "$WORK/v0clone/v0-fetch.txt"
+git -C "$WORK/v0clone" fsck --full
+test -z "$(git -C "$WORK/v0clone" status --porcelain)"
 
 # ---------------------------------------------------------------------------
 # local-path transport

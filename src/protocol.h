@@ -18,6 +18,15 @@ typedef struct {
     unsigned char default_oid[OID_RAW];
     int has_default_oid;
     int empty;                     /* remote has no commits yet */
+
+    /* Protocol v0 capability state, populated when the server does not
+     * support v2. Unused for v2 and local repositories. */
+    int protocol_v0;
+    int sideband;
+    int sideband_64k;
+    int ofs_delta;
+    int no_progress;
+    int shallow;
 } RemoteRefs;
 
 void remote_refs_free(RemoteRefs *r);

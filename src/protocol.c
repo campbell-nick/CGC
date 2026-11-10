@@ -29,7 +29,168 @@ static int line_has(const unsigned char *line, size_t len, const char *needle)
     return 0;
 }
 
-static int discover(const char *url, int *unborn_ok)
+static Ref *ref_find(RemoteRefs *refs, const char *name)
+{
+    for (size_t i = 0; i < refs->count; i++)
+        if (strcmp(refs->refs[i].name, name) == 0)
+            return &refs->refs[i];
+    return NULL;
+}
+
+static Ref *ref_add(RemoteRefs *refs, const char *name, size_t *cap)
+{
+    if (refs->count == *cap) {
+        *cap = *cap ? *cap * 2 : 16;
+        refs->refs = xrealloc(refs->refs, *cap * sizeof(Ref));
+    }
+    Ref *ref = &refs->refs[refs->count++];
+    memset(ref, 0, sizeof(*ref));
+    ref->name = xstrdup(name);
+    return ref;
+}
+
+static int oid_is_zero(const unsigned char oid[OID_RAW])
+{
+    for (size_t i = 0; i < OID_RAW; i++)
+        if (oid[i])
+            return 0;
+    return 1;
+}
+
+/* Parse the capability list from a v0 ref advertisement. The capabilities
+ * appear after a NUL byte on the first advertised ref. */
+static int parse_v0_caps(RemoteRefs *out, const char *caps, char **symref_head)
+{
+    char *copy = xstrdup(caps);
+    size_t len = strlen(copy);
+    while (len > 0 && (copy[len - 1] == '\n' || copy[len - 1] == '\r'))
+        copy[--len] = '\0';
+
+    int rc = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(copy, " ", &save); tok;
+         tok = strtok_r(NULL, " ", &save)) {
+        if (strcmp(tok, "side-band-64k") == 0) {
+            out->sideband = 1;
+            out->sideband_64k = 1;
+        } else if (strcmp(tok, "side-band") == 0) {
+            out->sideband = 1;
+        } else if (strcmp(tok, "ofs-delta") == 0) {
+            out->ofs_delta = 1;
+        } else if (strcmp(tok, "no-progress") == 0) {
+            out->no_progress = 1;
+        } else if (strcmp(tok, "shallow") == 0) {
+            out->shallow = 1;
+        } else if (strncmp(tok, "symref=HEAD:", 12) == 0) {
+            const char *target = tok + 12;
+            if (ref_name_is_valid(target)) {
+                free(*symref_head);
+                *symref_head = xstrdup(target);
+            }
+        } else if (strncmp(tok, "object-format=", 14) == 0) {
+            if (strcmp(tok + 14, "sha1") != 0) {
+                warn_cgc("only SHA-1 repositories are supported");
+                rc = -1;
+            }
+        }
+    }
+
+    free(copy);
+    return rc;
+}
+
+/* Parse a v0 ref advertisement into the same shape used by protocol v2. */
+static int parse_v0_refs(PktReader *pr, RemoteRefs *out)
+{
+    const unsigned char *line;
+    size_t linelen;
+    char *symref_head = NULL;
+    size_t cap = 0;
+    int first = 1;
+
+    while (pkt_read(pr, &line, &linelen) == PKT_DATA) {
+        size_t namelen = linelen;
+        const unsigned char *nul = memchr(line, '\0', linelen);
+        if (nul) {
+            namelen = (size_t)(nul - line);
+            if (first) {
+                char *caps = xstrndup((const char *)nul + 1,
+                                      linelen - namelen - 1);
+                int rc = parse_v0_caps(out, caps, &symref_head);
+                free(caps);
+                if (rc != 0)
+                    goto fail;
+            }
+        }
+        first = 0;
+
+        while (namelen > 0 &&
+               (line[namelen - 1] == '\n' || line[namelen - 1] == '\r'))
+            namelen--;
+        if (namelen < OID_HEX + 2 || line[OID_HEX] != ' ')
+            goto fail;
+
+        char hex[OID_HEX + 1];
+        memcpy(hex, line, OID_HEX);
+        hex[OID_HEX] = '\0';
+        unsigned char oid[OID_RAW];
+        if (oid_parse(hex, oid) != 0)
+            goto fail;
+
+        char *name = xstrndup((const char *)line + OID_HEX + 1,
+                              namelen - OID_HEX - 1);
+        size_t n = strlen(name);
+
+        if (strcmp(name, "capabilities^{}") == 0) {
+            out->empty = 1;
+            free(name);
+            continue;
+        }
+
+        if (n > 3 && strcmp(name + n - 3, "^{}") == 0) {
+            name[n - 3] = '\0';
+            Ref *tag = ref_find(out, name);
+            if (tag) {
+                memcpy(tag->peeled, oid, OID_RAW);
+                tag->has_peeled = 1;
+            }
+            free(name);
+            continue;
+        }
+
+        if (strcmp(name, "HEAD") != 0 &&
+            (!ref_name_is_valid(name) ||
+             (strncmp(name, "refs/heads/", 11) != 0 &&
+              strncmp(name, "refs/tags/", 10) != 0))) {
+            free(name);
+            continue;
+        }
+
+        Ref *ref = ref_add(out, name, &cap);
+        memcpy(ref->oid, oid, OID_RAW);
+        free(name);
+    }
+
+    Ref *head = ref_find(out, "HEAD");
+    if (head && oid_is_zero(head->oid))
+        out->empty = 1;
+    if (symref_head) {
+        if (!head) {
+            /* An empty repository advertises only capabilities^{}, so create
+             * a synthetic HEAD to carry the symref for the default branch. */
+            head = ref_add(out, "HEAD", &cap);
+        }
+        free(head->symref);
+        head->symref = symref_head;
+    }
+    return 0;
+
+fail:
+    free(symref_head);
+    return -1;
+}
+
+static int discover(const char *url, int *unborn_ok, RemoteRefs *out)
 {
     *unborn_ok = 0;
     char *u = endpoint(url, "/info/refs?service=git-upload-pack");
@@ -61,35 +222,53 @@ static int discover(const char *url, int *unborn_ok)
             kind = pkt_read(&pr, &line, &linelen);
     }
 
-    int ok = 0;
     if (kind == PKT_DATA && linelen >= 9 &&
-        memcmp(line, "version 2", 9) == 0)
-        ok = 1;
-
-    /* Drain the capability advertisement. */
-    while (pkt_read(&pr, &line, &linelen) == PKT_DATA) {
-        if (linelen >= 7 && memcmp(line, "ls-refs", 7) == 0 &&
-            line_has(line, linelen, "unborn"))
-            *unborn_ok = 1;
-        if (linelen >= 14 && memcmp(line, "object-format=", 14) == 0) {
-            size_t rest = linelen - 14;
-            while (rest > 0 &&
-                   (line[14 + rest - 1] == '\n' || line[14 + rest - 1] == '\r'))
-                rest--;
-            if (rest != 4 || memcmp(line + 14, "sha1", 4) != 0) {
-                warn_cgc("only SHA-1 repositories are supported");
-                http_response_free(&resp);
-                return -1;
+        memcmp(line, "version 2", 9) == 0) {
+        /* Drain the v2 capability advertisement. */
+        while (pkt_read(&pr, &line, &linelen) == PKT_DATA) {
+            if (linelen >= 7 && memcmp(line, "ls-refs", 7) == 0 &&
+                line_has(line, linelen, "unborn"))
+                *unborn_ok = 1;
+            if (linelen >= 14 && memcmp(line, "object-format=", 14) == 0) {
+                size_t rest = linelen - 14;
+                while (rest > 0 &&
+                       (line[14 + rest - 1] == '\n' ||
+                        line[14 + rest - 1] == '\r'))
+                    rest--;
+                if (rest != 4 || memcmp(line + 14, "sha1", 4) != 0) {
+                    warn_cgc("only SHA-1 repositories are supported");
+                    http_response_free(&resp);
+                    return -1;
+                }
             }
         }
+        http_response_free(&resp);
+        return 0;
+    }
+
+    /* No v2 banner: fall back to the protocol v0 ref advertisement. */
+    if (kind == PKT_DATA) {
+        pr.pos -= 4 + linelen;
+        if (parse_v0_refs(&pr, out) != 0) {
+            warn_cgc("malformed ref advertisement");
+            http_response_free(&resp);
+            return -1;
+        }
+        out->protocol_v0 = 1;
+        http_response_free(&resp);
+        return 1;
+    }
+
+    if (kind == PKT_FLUSH || kind == PKT_EOF) {
+        out->empty = 1;
+        out->protocol_v0 = 1;
+        http_response_free(&resp);
+        return 1;
     }
 
     http_response_free(&resp);
-    if (!ok) {
-        warn_cgc("server does not support Git protocol v2");
-        return -1;
-    }
-    return 0;
+    warn_cgc("unexpected ref advertisement");
+    return -1;
 }
 
 static char *trim_newline(const unsigned char *line, size_t len)
@@ -165,13 +344,67 @@ static int post_command(const char *url, const char *endpoint_path,
     return rc;
 }
 
+static void select_default_ref(RemoteRefs *out)
+{
+    /* Pick the default branch from HEAD. */
+    for (size_t i = 0; i < out->count; i++) {
+        Ref *r = &out->refs[i];
+        if (strcmp(r->name, "HEAD") != 0)
+            continue;
+        if (r->symref && strncmp(r->symref, "refs/heads/", 11) == 0)
+            out->default_ref = xstrdup(r->symref);
+        if (!out->empty && !oid_is_zero(r->oid)) {
+            memcpy(out->default_oid, r->oid, OID_RAW);
+            out->has_default_oid = 1;
+        }
+    }
+
+    if (!out->default_ref) {
+        const char *candidates[] = {"refs/heads/main", "refs/heads/master"};
+        for (size_t c = 0; c < 2 && !out->default_ref; c++) {
+            for (size_t i = 0; i < out->count; i++) {
+                if (strcmp(out->refs[i].name, candidates[c]) == 0) {
+                    out->default_ref = xstrdup(candidates[c]);
+                    break;
+                }
+            }
+        }
+    }
+    if (!out->default_ref) {
+        for (size_t i = 0; i < out->count; i++) {
+            if (strncmp(out->refs[i].name, "refs/heads/", 11) == 0) {
+                out->default_ref = xstrdup(out->refs[i].name);
+                break;
+            }
+        }
+    }
+
+    if (!out->default_ref && out->empty)
+        out->default_ref = xstrdup("refs/heads/main");
+
+    if (out->default_ref) {
+        for (size_t i = 0; i < out->count; i++) {
+            if (strcmp(out->refs[i].name, out->default_ref) == 0) {
+                memcpy(out->default_oid, out->refs[i].oid, OID_RAW);
+                out->has_default_oid = 1;
+                break;
+            }
+        }
+    }
+}
+
 int protocol_ls_refs(const char *url, RemoteRefs *out)
 {
     memset(out, 0, sizeof(*out));
 
     int unborn_ok = 0;
-    if (discover(url, &unborn_ok) != 0)
+    int version = discover(url, &unborn_ok, out);
+    if (version < 0)
         return -1;
+    if (version == 1) {
+        select_default_ref(out);
+        return 0;
+    }
 
     Buf req;
     buf_init(&req);
@@ -228,52 +461,7 @@ int protocol_ls_refs(const char *url, RemoteRefs *out)
     }
     http_response_free(&resp);
 
-    /* Pick the default branch from HEAD. */
-    for (size_t i = 0; i < out->count; i++) {
-        Ref *r = &out->refs[i];
-        if (strcmp(r->name, "HEAD") != 0)
-            continue;
-        if (r->symref && strncmp(r->symref, "refs/heads/", 11) == 0)
-            out->default_ref = xstrdup(r->symref);
-        if (!out->empty) {
-            memcpy(out->default_oid, r->oid, OID_RAW);
-            out->has_default_oid = 1;
-        }
-    }
-
-    if (!out->default_ref) {
-        const char *candidates[] = {"refs/heads/main", "refs/heads/master"};
-        for (size_t c = 0; c < 2 && !out->default_ref; c++) {
-            for (size_t i = 0; i < out->count; i++) {
-                if (strcmp(out->refs[i].name, candidates[c]) == 0) {
-                    out->default_ref = xstrdup(candidates[c]);
-                    break;
-                }
-            }
-        }
-    }
-    if (!out->default_ref) {
-        for (size_t i = 0; i < out->count; i++) {
-            if (strncmp(out->refs[i].name, "refs/heads/", 11) == 0) {
-                out->default_ref = xstrdup(out->refs[i].name);
-                break;
-            }
-        }
-    }
-
-    if (!out->default_ref && out->empty)
-        out->default_ref = xstrdup("refs/heads/main");
-
-    if (out->default_ref) {
-        for (size_t i = 0; i < out->count; i++) {
-            if (strcmp(out->refs[i].name, out->default_ref) == 0) {
-                memcpy(out->default_oid, out->refs[i].oid, OID_RAW);
-                out->has_default_oid = 1;
-                break;
-            }
-        }
-    }
-
+    select_default_ref(out);
     return 0;
 }
 
@@ -480,13 +668,69 @@ static void delta_progress(void *ud, uint32_t done, uint32_t total)
     progress_deltas_update(done, total);
 }
 
-int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
-                   int depth, const unsigned char (*haves)[OID_RAW],
-                   size_t nhaves)
+static void write_shallow_file(const char *gitdir,
+                               const unsigned char (*shallow)[OID_RAW],
+                               size_t nshallow)
 {
-    if (refs->empty)
-        return 0;
+    char *path = path_join(gitdir, "shallow");
+    Buf sb;
+    buf_init(&sb);
+    for (size_t i = 0; i < nshallow; i++) {
+        char hex[OID_HEX + 1];
+        oid_hex(shallow[i], hex);
+        buf_appendf(&sb, "%s\n", hex);
+    }
+    if (write_file(path, sb.data, sb.len, 0644) != 0)
+        warn_cgc("could not write .git/shallow");
+    buf_free(&sb);
+    free(path);
+}
 
+/* Validate and unpack a received pack, then record shallow boundaries. */
+static int finish_pack(Buf *pack, const char *gitdir, int depth,
+                       const unsigned char (*shallow)[OID_RAW],
+                       size_t nshallow)
+{
+    if (pack->len == 0) {
+        /* The server had nothing to send because every want was already
+         * reachable from a have. This is success, not a malformed response. */
+        progress_clear();
+        return 0;
+    }
+
+    if (pack->len < 12 || memcmp(pack->data, "PACK", 4) != 0) {
+        warn_cgc("remote did not send a valid packfile");
+        return -1;
+    }
+
+    uint32_t objects = get_be32(pack->data + 8);
+    if (objects == 0) {
+        /* An empty pack (header plus trailer) means there was nothing new.
+         * Do not print a receive/delta summary for a no-op fetch. */
+        progress_clear();
+        return 0;
+    }
+    progress_receive_end(objects, pack->len);
+
+    PackStats stats;
+    memset(&stats, 0, sizeof(stats));
+    int rc = pack_unpack(pack->data, pack->len, gitdir, &stats,
+                         delta_progress, NULL);
+    if (rc != 0) {
+        progress_clear();
+        warn_cgc("failed to unpack packfile");
+        return -1;
+    }
+
+    progress_deltas_end(stats.deltas);
+    if (depth > 0 && nshallow > 0)
+        write_shallow_file(gitdir, shallow, nshallow);
+    return 0;
+}
+
+static int collect_wants(const RemoteRefs *refs,
+                         unsigned char (**out)[OID_RAW], size_t *out_count)
+{
     unsigned char(*wants)[OID_RAW] = xcalloc(refs->count + 1, OID_RAW);
     size_t nwants = 0;
 
@@ -505,9 +749,320 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
              !oid_seen(wants, nwants, refs->default_oid))
         memcpy(wants[nwants++], refs->default_oid, OID_RAW);
 
+    *out = wants;
+    *out_count = nwants;
+    return 0;
+}
+
+typedef struct {
+    int sideband;
+    int raw;
+    int done;
+    int failed;
+    int got_ack;
+    Buf pack;
+    Buf pending;
+    Buf error;
+    unsigned char (*shallow)[OID_RAW];
+    size_t nshallow;
+    size_t capshallow;
+} FetchV0;
+
+static void v0_add_shallow(FetchV0 *d, const unsigned char oid[OID_RAW])
+{
+    if (d->nshallow == d->capshallow) {
+        d->capshallow = d->capshallow ? d->capshallow * 2 : 8;
+        d->shallow = xrealloc(d->shallow, d->capshallow * OID_RAW);
+    }
+    memcpy(d->shallow[d->nshallow++], oid, OID_RAW);
+}
+
+static void v0_demux_line(FetchV0 *d, const unsigned char *line, size_t len)
+{
+    size_t l = len;
+    while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r'))
+        l--;
+
+    if (l > 8 && memcmp(line, "shallow ", 8) == 0) {
+        char *s = xstrndup((const char *)line + 8, l - 8);
+        unsigned char oid[OID_RAW];
+        if (oid_parse(s, oid) == 0)
+            v0_add_shallow(d, oid);
+        free(s);
+        return;
+    }
+    if (l > 10 && memcmp(line, "unshallow ", 10) == 0)
+        return;
+
+    if ((l == 3 && memcmp(line, "NAK", 3) == 0) ||
+        (l >= 4 && memcmp(line, "ACK ", 4) == 0)) {
+        d->got_ack = 1;
+        return;
+    }
+
+    if (!d->sideband)
+        return; /* raw pack bytes are detected by framing. */
+
+    if (len < 1)
+        return;
+    int band = line[0];
+    if (band < 1 || band > 3)
+        return;
+
+    const unsigned char *payload = line + 1;
+    size_t plen = len - 1;
+    if (band == 1) {
+        buf_append(&d->pack, payload, plen);
+        progress_receive_update(d->pack.len);
+    } else if (band == 2) {
+        progress_remote(payload, plen);
+    } else {
+        progress_clear();
+        if (d->error.len)
+            buf_putc(&d->error, '\n');
+        buf_append(&d->error, payload, plen);
+    }
+}
+
+static int fetch_feed_v0(void *ud, const void *data, size_t len)
+{
+    FetchV0 *d = ud;
+    if (d->failed || d->done)
+        return 0;
+
+    buf_append(&d->pending, data, len);
+
+    size_t pos = 0;
+    while (!d->done && !cgc_interrupted) {
+        if (d->raw) {
+            buf_append(&d->pack, d->pending.data + pos,
+                       d->pending.len - pos);
+            progress_receive_update(d->pack.len);
+            pos = d->pending.len;
+            break;
+        }
+        if (d->pending.len - pos < 4)
+            break;
+
+        const unsigned char *p = d->pending.data + pos;
+        int v = 0;
+        int ok = 1;
+        for (int i = 0; i < 4; i++) {
+            int c = p[i];
+            int h;
+            if (c >= '0' && c <= '9')
+                h = c - '0';
+            else if (c >= 'a' && c <= 'f')
+                h = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F')
+                h = c - 'A' + 10;
+            else {
+                ok = 0;
+                break;
+            }
+            v = (v << 4) | h;
+        }
+
+        if (!ok) {
+            if (d->sideband) {
+                d->failed = 1;
+                return -1;
+            }
+            /* Without side-band, the packfile follows the ACK/NAK lines as
+             * raw bytes rather than pkt-lines. */
+            d->raw = 1;
+            buf_append(&d->pack, p, d->pending.len - pos);
+            progress_receive_update(d->pack.len);
+            pos = d->pending.len;
+            break;
+        }
+        if (v == 3) {
+            d->failed = 1;
+            return -1;
+        }
+        if (v == 0) {
+            /* A flush before any ACK/NAK or pack data terminates the shallow
+             * negotiation section, not the response. */
+            if (d->got_ack || d->pack.len > 0)
+                d->done = 1;
+            pos += 4;
+            continue;
+        }
+        if (v == 1 || v == 2) {
+            pos += 4;
+            continue;
+        }
+        if (v < 4) {
+            d->failed = 1;
+            return -1;
+        }
+        size_t plen = (size_t)v - 4;
+        if (d->pending.len - pos - 4 < plen)
+            break;
+        v0_demux_line(d, p + 4, plen);
+        pos += 4 + plen;
+    }
+
+    buf_consume(&d->pending, pos);
+    if (cgc_interrupted)
+        return -1;
+    return d->failed ? -1 : 0;
+}
+
+static int fetch_request_v0(const char *url, Buf *req, FetchV0 *d,
+                            HttpResponse *resp)
+{
+    char *u = endpoint(url, "/git-upload-pack");
+    int rc = http_request_stream("POST", u,
+                                 "application/x-git-upload-pack-request",
+                                 req->data, req->len,
+                                 "Accept: application/x-git-upload-pack-result\r\n",
+                                 fetch_feed_v0, d, resp);
+    free(u);
+    return rc;
+}
+
+static int protocol_fetch_v0(const char *url, const RemoteRefs *refs,
+                             const unsigned char (*wants)[OID_RAW],
+                             size_t nwants, const char *gitdir, int depth,
+                             const unsigned char (*haves)[OID_RAW],
+                             size_t nhaves)
+{
+    if (depth > 0 && !refs->shallow) {
+        warn_cgc("remote does not support shallow fetches");
+        return -1;
+    }
+
+    Buf caps;
+    buf_init(&caps);
+    if (refs->ofs_delta)
+        buf_appendf(&caps, " ofs-delta");
+    if (refs->sideband_64k)
+        buf_appendf(&caps, " side-band-64k");
+    else if (refs->sideband)
+        buf_appendf(&caps, " side-band");
+    if (!progress_live_enabled() && refs->no_progress)
+        buf_appendf(&caps, " no-progress");
+    buf_appendf(&caps, " agent=cgc/" CGC_VERSION);
+
+    Buf req;
+    buf_init(&req);
+    for (size_t i = 0; i < nwants; i++) {
+        char hex[OID_HEX + 1];
+        oid_hex(wants[i], hex);
+        Buf line;
+        buf_init(&line);
+        buf_appendf(&line, "want %s%s\n", hex,
+                    i == 0 ? (char *)caps.data : "");
+        pkt_write_str(&req, (char *)line.data);
+        buf_free(&line);
+    }
+    if (depth > 0) {
+        char line[64];
+        snprintf(line, sizeof(line), "deepen %d\n", depth);
+        pkt_write_str(&req, line);
+    }
+
+    /* The want/deepen section ends with a flush; haves and done follow in a
+     * second section. Stateless HTTP servers reject the request otherwise. */
+    pkt_flush(&req);
+
+    for (size_t i = 0; i < nhaves; i++) {
+        char hex[OID_HEX + 1];
+        oid_hex(haves[i], hex);
+        char line[64];
+        snprintf(line, sizeof(line), "have %s\n", hex);
+        pkt_write_str(&req, line);
+    }
+    pkt_write_str(&req, "done\n");
+    buf_free(&caps);
+
+    FetchV0 demux;
+    memset(&demux, 0, sizeof(demux));
+    demux.sideband = refs->sideband;
+    buf_init(&demux.pack);
+    buf_init(&demux.pending);
+    buf_init(&demux.error);
+
+    HttpResponse resp;
+    progress_receive_begin();
+    int rc = fetch_request_v0(url, &req, &demux, &resp);
+    buf_free(&req);
+    if (rc != 0) {
+        buf_free(&demux.pack);
+        buf_free(&demux.pending);
+        buf_free(&demux.error);
+        free(demux.shallow);
+        return -1;
+    }
+
+    progress_remote_end();
+
+    if (resp.status != 200) {
+        warn_cgc("remote returned HTTP %d while fetching", resp.status);
+        http_response_free(&resp);
+        buf_free(&demux.pack);
+        buf_free(&demux.pending);
+        buf_free(&demux.error);
+        free(demux.shallow);
+        return -1;
+    }
+
+    if (demux.failed || demux.pending.len > 0) {
+        warn_cgc("malformed fetch response");
+        http_response_free(&resp);
+        buf_free(&demux.pack);
+        buf_free(&demux.pending);
+        buf_free(&demux.error);
+        free(demux.shallow);
+        return -1;
+    }
+
+    if (demux.error.len > 0) {
+        char *msg = trim_newline(demux.error.data, demux.error.len);
+        warn_cgc("remote error: %s", msg);
+        free(msg);
+        http_response_free(&resp);
+        buf_free(&demux.pack);
+        buf_free(&demux.pending);
+        buf_free(&demux.error);
+        free(demux.shallow);
+        return -1;
+    }
+
+    http_response_free(&resp);
+
+    Buf pack = demux.pack;
+    buf_init(&demux.pack);
+    buf_free(&demux.pending);
+    buf_free(&demux.error);
+
+    rc = finish_pack(&pack, gitdir, depth, demux.shallow, demux.nshallow);
+    buf_free(&pack);
+    free(demux.shallow);
+    return rc;
+}
+
+int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
+                   int depth, const unsigned char (*haves)[OID_RAW],
+                   size_t nhaves)
+{
+    if (refs->empty)
+        return 0;
+
+    unsigned char(*wants)[OID_RAW];
+    size_t nwants = 0;
+    collect_wants(refs, &wants, &nwants);
     if (nwants == 0) {
         free(wants);
         return 0;
+    }
+
+    if (refs->protocol_v0) {
+        int rc = protocol_fetch_v0(url, refs, wants, nwants, gitdir, depth,
+                                   haves, nhaves);
+        free(wants);
+        return rc;
     }
 
     Buf req;
@@ -604,67 +1159,8 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
     buf_free(&demux.pending);
     buf_free(&demux.error);
 
-    if (pack.len == 0) {
-        /* The server had nothing to send because every want was already
-         * reachable from a have. This is success, not a malformed response. */
-        progress_clear();
-        buf_free(&pack);
-        free(demux.shallow);
-        return 0;
-    }
-
-    if (pack.len < 12 || memcmp(pack.data, "PACK", 4) != 0) {
-        warn_cgc("remote did not send a valid packfile");
-        buf_free(&pack);
-        return -1;
-    }
-
-    uint32_t objects = get_be32(pack.data + 8);
-    if (objects == 0) {
-        /* An empty pack (header plus trailer) means there was nothing new.
-         * Do not print a receive/delta summary for a no-op fetch. */
-        progress_clear();
-        buf_free(&pack);
-        free(demux.shallow);
-        return 0;
-    }
-    progress_receive_end(objects, pack.len);
-
-    PackStats stats;
-    memset(&stats, 0, sizeof(stats));
-    rc = pack_unpack(pack.data, pack.len, gitdir, &stats,
-                     delta_progress, NULL);
+    rc = finish_pack(&pack, gitdir, depth, demux.shallow, demux.nshallow);
     buf_free(&pack);
-    if (rc != 0) {
-        progress_clear();
-        warn_cgc("failed to unpack packfile");
-        /* fall through to cleanup shallow list */
-    } else {
-        progress_deltas_end(stats.deltas);
-
-        if (depth > 0 && demux.nshallow > 0) {
-            char *shallow_path = path_join(gitdir, "shallow");
-            Buf sb;
-            buf_init(&sb);
-            for (size_t i = 0; i < demux.nshallow; i++) {
-                char hex[OID_HEX + 1];
-                oid_hex(demux.shallow[i], hex);
-                buf_appendf(&sb, "%s\n", hex);
-            }
-            if (write_file(shallow_path, sb.data, sb.len, 0644) != 0)
-                warn_cgc("could not write .git/shallow");
-            buf_free(&sb);
-            free(shallow_path);
-        }
-    }
-
-    /* cleanup demux shallow list */
     free(demux.shallow);
-    demux.shallow = NULL;
-    demux.nshallow = 0;
-    demux.capshallow = 0;
-
-    if (rc != 0)
-        return -1;
-    return 0;
+    return rc;
 }

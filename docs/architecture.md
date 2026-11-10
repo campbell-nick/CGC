@@ -10,13 +10,21 @@
    `HEAD`, and a basic config.
 3. **Capability discovery** (`protocol.c`, `http.c`) — `GET
    <repo>/info/refs?service=git-upload-pack` with `Git-Protocol: version=2`.
-   TLS certificates are verified with the system trust store.
-4. **Ref listing** — `POST <repo>/git-upload-pack` with `command=ls-refs`,
-   requesting peeled refs, symrefs and unborn `HEAD`. This yields all branches,
-   tags and the default branch.
-5. **Fetch** — another `command=fetch` request asking for every advertised ref
-   tip with `ofs-delta` and `done`. The response is a sideband-multiplexed
-   packfile, streamed so network progress can be reported as it arrives.
+   TLS certificates are verified with the system trust store. If the server
+   does not answer with a `version 2` banner, its protocol v0 ref
+   advertisement is parsed instead, including NUL-separated capabilities,
+   peeled `^{}` tag lines, and `symref=HEAD:...`.
+4. **Ref listing** — for v2, `POST <repo>/git-upload-pack` with
+   `command=ls-refs`, requesting peeled refs, symrefs and unborn `HEAD`. This
+   yields all branches, tags and the default branch. The v0 advertisement is
+   already the ref list.
+5. **Fetch** — for v2, another `command=fetch` request asking for every
+   advertised ref tip with `ofs-delta` and `done`. The response is a
+   sideband-multiplexed packfile, streamed so network progress can be reported
+   as it arrives. For v0, `want`/`deepen` lines are terminated with a flush,
+   then `have` lines and `done` follow; the response mixes plain pkt-lines
+   (`shallow`, `ACK`/`NAK`) with sideband data, with a raw-pack fallback when
+   no sideband capability is negotiated.
 6. **Unpack** (`pack.c`, `odb.c`) — verifies the pack checksum, inflates every
    entry, resolves `OFS_DELTA` and `REF_DELTA` chains with an oid hash map and
    binary-searched offsets, hashes each object and writes it as a loose,
@@ -95,7 +103,7 @@ src/
   http.c       HTTP/1.1 over TCP + OpenSSL, chunked bodies, redirects
   local.c      local repository discovery, refs, object and pack copying
   pktline.c    Git pkt-line framing
-  protocol.c   protocol v2: discovery, ls-refs, fetch, sideband
+  protocol.c   protocol v2 and v0 fallback: discovery, refs, fetch, sideband
   progress.c   Git-style status output and progress meters
   pack.c       packfile parsing, delta resolution
   odb.c        loose object read/write and hashing
