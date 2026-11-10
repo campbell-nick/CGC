@@ -84,6 +84,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- `--help` output is more compact: related options share a line, repository
+  shorthands are shown in columns, and the clone help fits on one screen.
 - Pull is fast-forward-only and preserves unchanged files. It refuses to
   overwrite local modifications or untracked paths, and refuses to fetch into a
   shallow clone.
