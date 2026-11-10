@@ -48,6 +48,7 @@ static void usage(FILE *out)
             "  --no-single-branch\n"
             "                 fetch all branches (default unless --depth is given)\n"
             "  --bare          create a bare repository (no working tree or index)\n"
+            "  --mirror        mirror all refs into a bare repository (implies --bare)\n"
             "  --no-checkout   do not check out files into the working tree\n"
             "  --no-tags       do not fetch or update tags\n"
             "  --origin <name> use <name> for the remote (default origin)\n"
@@ -139,7 +140,8 @@ static void update_usage(FILE *out, int pull)
             "  --tags          fetch and update all advertised tags (default)\n"
             "  --no-tags       do not fetch or update tags\n"
             "  --force         overwrite a local tag that differs from the remote\n"
-            "  --prune         delete stale refs/remotes/origin/* refs\n"
+            "  --prune         delete stale refs under the fetch refspec namespaces\n"
+            "  --remote <name> use <name> instead of the configured default remote\n"
             "  -h, --help      show this help\n"
             "  -V, --version   show version\n"
             "\n"
@@ -186,6 +188,10 @@ static int run_subcommand(int argc, char **argv, int pull)
             opts.no_tags = 1;
         } else if (strcmp(a, "--prune") == 0) {
             opts.prune = 1;
+        } else if (strcmp(a, "--remote") == 0) {
+            if (i + 1 >= argc)
+                die("--remote requires an argument");
+            opts.remote = argv[++i];
         } else if (strcmp(a, "--token") == 0) {
             if (i + 1 >= argc)
                 die("--token requires an argument");
@@ -342,6 +348,7 @@ int main(int argc, char **argv)
     int single_branch = 0;
     int no_single_branch = 0;
     int bare = 0;
+    int mirror = 0;
     int no_checkout = 0;
     int no_tags = 0;
     const char *remote_name = "origin";
@@ -389,6 +396,9 @@ int main(int argc, char **argv)
             no_single_branch = 1;
         } else if (strcmp(a, "--bare") == 0) {
             bare = 1;
+        } else if (strcmp(a, "--mirror") == 0) {
+            mirror = 1;
+            bare = 1;
         } else if (strcmp(a, "--no-checkout") == 0) {
             no_checkout = 1;
         } else if (strcmp(a, "--no-tags") == 0) {
@@ -431,6 +441,8 @@ int main(int argc, char **argv)
     int local = url_is_local(url);
     if (local && depth > 0)
         die("--depth is not supported for local repositories yet");
+    if (mirror && depth > 0)
+        die("--depth is not compatible with --mirror");
 
     /* Strip any embedded credentials from the URL so they are not persisted
      * in .git/config. Use --token / CGC_TOKEN / GIT_TOKEN for auth. */
@@ -487,6 +499,8 @@ int main(int argc, char **argv)
         single_branch = 0;
     else if (depth > 0)
         single_branch = 1;
+    if (mirror)
+        single_branch = 0;
 
     RemoteRefs refs;
     int ls_rc = local ? local_ls_refs(url, &refs)
@@ -528,8 +542,8 @@ int main(int argc, char **argv)
     }
 
     /* --no-tags: drop advertised tags before the fetch request, but keep a tag
-     * explicitly selected with --branch. */
-    if (no_tags && !refs.empty) {
+     * explicitly selected with --branch. A mirror always copies every ref. */
+    if (no_tags && !mirror && !refs.empty) {
         char keep_tag[512];
         int has_keep = 0;
         if (branch) {
@@ -625,7 +639,7 @@ int main(int argc, char **argv)
     }
 
     if (repo_write_config(gitdir, url, bare ? NULL : config_ref, remote_name,
-                          bare) != 0)
+                          bare, mirror) != 0)
         die("cannot write repository configuration");
     if (detached) {
         if (repo_set_head_detached(gitdir, target_oid) != 0)
@@ -643,8 +657,9 @@ int main(int argc, char **argv)
             remote_refs_free(&refs);
             die("fetch failed");
         }
-        int write_rc = bare ? repo_write_bare_refs(gitdir, &refs)
-                            : repo_write_refs(gitdir, &refs, remote_name);
+        int write_rc = mirror ? repo_write_mirror_refs(gitdir, &refs)
+                        : bare ? repo_write_bare_refs(gitdir, &refs)
+                               : repo_write_refs(gitdir, &refs, remote_name);
         if (write_rc != 0) {
             remote_refs_free(&refs);
             die("cannot write refs");

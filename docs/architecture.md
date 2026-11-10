@@ -32,7 +32,9 @@
 7. **Refs and config** (`repo.c`) — writes local branches, tags,
    `refs/remotes/<remote>/*`, `<remote>/HEAD`, `HEAD`, and the named remote
    (default `origin`). A bare clone writes refs and objects directly into the
-   destination and omits the fetch refspec and branch section.
+   destination and omits the fetch refspec and branch section. A mirror clone
+   is bare and copies every advertised ref verbatim, with a refs-wide fetch
+   refspec and `mirror = true` in the config.
 8. **Checkout** (`checkout.c`) — walks the `HEAD` tree, writes files, symlinks,
    executable bits and submodule mount points, then writes a DIRC version 2
    index so Git sees a clean working tree. `--bare` and `--no-checkout` skip
@@ -68,26 +70,33 @@ local history walker.
 different flow (`update.c`):
 
 1. **Locate the repository** — walk up from the given directory (default `.`)
-   until a `.git` directory, gitfile, or bare repository is found, and read the
-   first remote name and URL from the config.
-2. **Negotiate** — list refs as before, then send `command=fetch` with a `want`
-   for each remote ref and `have` lines for every local ref, branch and tag.
-   The server sends only objects reachable from the wants but not the haves.
-   For a local remote, `local.c` lists refs and copies all objects directly
-   instead of negotiating.
-3. **Unpack** — the same pack reader writes the new objects. An empty pack
+   until a `.git` directory, gitfile, or bare repository is found. The remote is
+   resolved from `--remote`, then `branch.<name>.remote` for the current
+   branch, then `origin`, then the first configured remote.
+2. **Refspecs** (`refspec.c`, `repo.c`) — parse the remote's `fetch` lines,
+   supporting force (`+`), wildcard, and negative (`^`) refspecs. A mirror uses
+   `+refs/*:refs/*`; a non-bare remote without a fetch line defaults to
+   `+refs/heads/*:refs/remotes/<remote>/*`.
+3. **Negotiate** — list refs as before, then send `command=fetch` with a `want`
+   for each selected remote ref and `have` lines for every local ref, branch and
+   tag. The server sends only objects reachable from the wants but not the
+   haves. For a local remote, `local.c` lists refs and copies all objects
+   directly instead of negotiating.
+4. **Unpack** — the same pack reader writes the new objects. An empty pack
    means the clone was already up to date.
-4. **Fetch bookkeeping** — rewrite `refs/remotes/<remote>/*` and tags. Existing
-   tags are preflighted and refused if the remote moved them, unless `--force`.
-   `--no-tags` skips tags, and `--prune` removes stale loose and packed
-   remote-tracking refs for the configured remote. Local branches and the
-   worktree are untouched. `FETCH_HEAD` is written atomically. In a bare
-   repository only `FETCH_HEAD` is written, matching Git's default behavior
-   without a fetch refspec.
-5. **Fast-forward check** (`pull` only) — walk the new commit's parents to
-   confirm the local branch tip is an ancestor. Merges and rebases are not
-   supported.
-6. **Worktree update** (`pull` only) — `checkout_update` compares the old and
+5. **Fetch bookkeeping** — map each advertised ref through the refspecs and
+   write the destinations. Existing tags are preflighted and refused if the
+   remote moved them, unless `--force` (a mirror always forces). `--no-tags`
+   skips tags, and `--prune` (implied by a mirror) removes stale loose and
+   packed refs under wildcard destination namespaces, preserving symrefs such as
+   `refs/remotes/<remote>/HEAD`. Local branches and the worktree are untouched.
+   `FETCH_HEAD` is written atomically. A bare repository with no fetch refspec
+   writes only `FETCH_HEAD`, matching Git's default behavior.
+6. **Fast-forward check** (`pull` only) — walk the new commit's parents to
+   confirm the local branch tip is an ancestor. The check runs before refspec
+   mappings are written so a refused pull cannot clobber a local branch through
+   a custom refspec. Merges and rebases are not supported.
+7. **Worktree update** (`pull` only) — `checkout_update` compares the old and
    new trees. Unchanged files are left alone; changed and deleted files must
    still match the old blob, and added paths must not collide with untracked
    files. Staged changes on untouched paths and index flags are preserved in
@@ -104,6 +113,7 @@ src/
   local.c      local repository discovery, refs, object and pack copying
   pktline.c    Git pkt-line framing
   protocol.c   protocol v2 and v0 fallback: discovery, refs, fetch, sideband
+  refspec.c    fetch refspec parsing, mapping, negative and wildcard refspecs
   progress.c   Git-style status output and progress meters
   pack.c       packfile parsing, delta resolution
   odb.c        loose object read/write and hashing

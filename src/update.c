@@ -330,73 +330,96 @@ static void short_oid(const unsigned char oid[OID_RAW], char out[8])
     out[7] = '\0';
 }
 
-/* Print a Git-style fetch summary. Must run before remote-tracking refs are
- * overwritten so old values can be compared. */
-static void report_fetch(const char *gitdir, const RemoteRefs *refs,
-                         const char *url)
+static void display_ref(const char *ref, const char *remote, Buf *out)
+{
+    Buf prefix;
+    buf_init(&prefix);
+    if (remote) {
+        buf_appendf(&prefix, "refs/remotes/%s/", remote);
+        if (strncmp(ref, (char *)prefix.data, prefix.len) == 0) {
+            buf_append(out, ref + prefix.len, strlen(ref + prefix.len));
+            buf_free(&prefix);
+            return;
+        }
+    }
+    buf_free(&prefix);
+
+    if (strncmp(ref, "refs/heads/", 11) == 0)
+        buf_append(out, ref + 11, strlen(ref + 11));
+    else if (strncmp(ref, "refs/tags/", 10) == 0)
+        buf_append(out, ref + 10, strlen(ref + 10));
+    else
+        buf_append(out, ref, strlen(ref));
+}
+
+/* Print a Git-style fetch summary. Must run before the refs are overwritten so
+ * old values can be compared. */
+static void report_fetch(const char *gitdir, const RefMapping *maps,
+                         size_t nmaps, const char *remote, const char *url)
 {
     if (cgc_quiet)
         return;
 
     int any = 0;
-    for (size_t i = 0; i < refs->count && !any; i++) {
-        const Ref *r = &refs->refs[i];
+    for (size_t i = 0; i < nmaps; i++) {
+        const RefMapping *m = &maps[i];
+        if (!m->dst)
+            continue;
         unsigned char old[OID_RAW];
-
-        if (strncmp(r->name, "refs/heads/", 11) == 0) {
-            Buf remote;
-            buf_init(&remote);
-            buf_appendf(&remote, "refs/remotes/origin/%s", r->name + 11);
-            int found = repo_read_ref(gitdir, (char *)remote.data, old) == 0;
-            if (!found || memcmp(old, r->oid, OID_RAW) != 0)
-                any = 1;
-            buf_free(&remote);
-        } else if (strncmp(r->name, "refs/tags/", 10) == 0) {
-            int found = repo_read_ref(gitdir, r->name, old) == 0;
-            if (!found || memcmp(old, r->oid, OID_RAW) != 0)
-                any = 1;
+        int found = repo_read_ref(gitdir, m->dst, old) == 0;
+        if (!found || memcmp(old, m->oid, OID_RAW) != 0) {
+            any = 1;
+            break;
         }
     }
-
     if (!any)
         return;
 
     fprintf(stderr, "From %s\n", url);
-    for (size_t i = 0; i < refs->count; i++) {
-        const Ref *r = &refs->refs[i];
-        unsigned char old[OID_RAW];
+    for (size_t i = 0; i < nmaps; i++) {
+        const RefMapping *m = &maps[i];
+        if (!m->dst)
+            continue;
 
-        if (strncmp(r->name, "refs/heads/", 11) == 0) {
-            Buf remote;
-            buf_init(&remote);
-            buf_appendf(&remote, "refs/remotes/origin/%s", r->name + 11);
-            int found = repo_read_ref(gitdir, (char *)remote.data, old) == 0;
-            if (!found) {
-                fprintf(stderr, " * [new branch]      %s -> origin/%s\n",
-                        r->name + 11, r->name + 11);
-            } else if (memcmp(old, r->oid, OID_RAW) != 0) {
-                char a[8], b[8];
-                short_oid(old, a);
-                short_oid(r->oid, b);
-                fprintf(stderr, "   %s..%s  %s -> origin/%s\n",
-                        a, b, r->name + 11, r->name + 11);
-            }
-            buf_free(&remote);
-        } else if (strncmp(r->name, "refs/tags/", 10) == 0) {
-            int found = repo_read_ref(gitdir, r->name, old) == 0;
-            if (!found) {
-                fprintf(stderr, " * [new tag]         %s -> %s\n",
-                        r->name + 10, r->name + 10);
-            } else if (memcmp(old, r->oid, OID_RAW) != 0) {
-                char a[8], b[8];
-                short_oid(old, a);
-                short_oid(r->oid, b);
-                fprintf(stderr, "   %s..%s  %s -> %s\n",
-                        a, b, r->name + 10, r->name + 10);
-            }
+        unsigned char old[OID_RAW];
+        int found = repo_read_ref(gitdir, m->dst, old) == 0;
+        if (found && memcmp(old, m->oid, OID_RAW) == 0)
+            continue;
+
+        Buf src, dst;
+        buf_init(&src);
+        buf_init(&dst);
+        display_ref(m->src, NULL, &src);
+        display_ref(m->dst, remote, &dst);
+
+        if (!found) {
+            const char *kind = strncmp(m->src, "refs/tags/", 10) == 0
+                                   ? "tag"
+                                   : (strncmp(m->src, "refs/heads/", 11) == 0
+                                          ? "branch"
+                                          : "ref");
+            fprintf(stderr, " * [new %s] %s -> %s\n", kind,
+                    (char *)src.data, (char *)dst.data);
+        } else {
+            char a[8], b[8];
+            short_oid(old, a);
+            short_oid(m->oid, b);
+            fprintf(stderr, "   %s..%s  %s -> %s\n", a, b,
+                    (char *)src.data, (char *)dst.data);
         }
+        buf_free(&src);
+        buf_free(&dst);
     }
     fflush(stderr);
+}
+
+static const char *mapping_dst_for_src(const RefMapping *maps, size_t count,
+                                       const char *src)
+{
+    for (size_t i = 0; i < count; i++)
+        if (maps[i].dst && strcmp(maps[i].src, src) == 0)
+            return maps[i].dst;
+    return NULL;
 }
 
 int update_run(const char *start_dir, const char *branch_opt, int pull,
@@ -416,10 +439,16 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
     }
 
     int rc = -1;
-    char *url = NULL;
     char *remote = NULL;
+    RemoteConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    RefspecSet spec;
+    refspec_set_init(&spec);
+    char *url = NULL;
     char *head_ref = NULL;
     char *target_ref = NULL;
+    char *merge_alloc = NULL;
+    const char *merge_ref = NULL;
     unsigned char (*haves)[OID_RAW] = NULL;
     size_t nhaves = 0;
     RemoteRefs refs;
@@ -427,6 +456,8 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
     RemoteRefs filtered;
     memset(&filtered, 0, sizeof(filtered));
     int have_filter = 0;
+    RefMapping *maps = NULL;
+    size_t nmaps = 0;
 
     if (is_shallow(gitdir)) {
         warn_cgc("fetching into a shallow clone is not supported yet");
@@ -438,12 +469,6 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
         goto done;
     }
 
-    if (repo_read_remote(gitdir, &remote, &url) != 0 || !url) {
-        warn_cgc("no remote configured");
-        goto done;
-    }
-    int local = url_is_local(url);
-
     unsigned char head_oid[OID_RAW];
     int has_head = 0;
     if (repo_head(gitdir, &head_ref, head_oid, &has_head) != 0) {
@@ -451,14 +476,62 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
         goto done;
     }
 
+    /* Resolve the remote: --remote wins, then the current branch's configured
+     * remote, then origin, then the first configured remote. */
+    if (opts && opts->remote) {
+        if (!repo_remote_name_is_valid(opts->remote)) {
+            warn_cgc("invalid remote name '%s'", opts->remote);
+            goto done;
+        }
+        remote = xstrdup(opts->remote);
+    } else {
+        int fr = repo_find_remote(gitdir, head_ref, &remote);
+        if (fr < 0) {
+            warn_cgc("cannot read remote configuration");
+            goto done;
+        }
+        if (fr > 0 || !remote) {
+            warn_cgc("no remote configured");
+            goto done;
+        }
+    }
+
+    int cr = repo_read_remote_config(gitdir, remote, &cfg);
+    if (cr < 0) {
+        warn_cgc("cannot read configuration for remote '%s'", remote);
+        goto done;
+    }
+    if (cr > 0) {
+        warn_cgc("remote '%s' is not configured", remote);
+        goto done;
+    }
+
+    url = xstrdup(cfg.url);
+    int local = url_is_local(url);
+    int mirror = cfg.mirror;
+
     if (branch_opt) {
         target_ref = branch_ref(branch_opt);
         if (!ref_name_is_valid(target_ref)) {
             warn_cgc("invalid branch name '%s'", branch_opt);
             goto done;
         }
+        merge_ref = target_ref;
     } else if (head_ref && strncmp(head_ref, "refs/heads/", 11) == 0) {
         target_ref = xstrdup(head_ref);
+        char *configured = NULL;
+        int br = repo_read_branch_merge(gitdir, target_ref, &configured);
+        if (br < 0) {
+            warn_cgc("cannot read branch configuration for '%s'",
+                     target_ref + 11);
+            goto done;
+        }
+        if (br == 0 && configured) {
+            merge_alloc = configured;
+            merge_ref = configured;
+        } else {
+            merge_ref = target_ref;
+        }
     }
 
     if (pull && !target_ref) {
@@ -472,6 +545,35 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
         goto done;
     }
 
+    /* Build the fetch refspec set. A mirror copies refs verbatim and prunes.
+     * A normal repository uses its configured fetch lines, or the standard
+     * remote-tracking refspec when none are configured. A bare repository
+     * without a refspec records FETCH_HEAD only. */
+    if (mirror) {
+        if (refspec_set_add(&spec, "+refs/*:refs/*") != 0) {
+            warn_cgc("cannot build mirror refspec");
+            goto done;
+        }
+    } else {
+        for (size_t i = 0; i < cfg.nfetch; i++) {
+            if (refspec_set_add(&spec, cfg.fetch[i]) != 0) {
+                warn_cgc("invalid fetch refspec '%s'", cfg.fetch[i]);
+                goto done;
+            }
+        }
+        if (cfg.nfetch == 0 && worktree) {
+            Buf b;
+            buf_init(&b);
+            buf_appendf(&b, "+refs/heads/*:refs/remotes/%s/*", remote);
+            int add = refspec_set_add(&spec, (char *)b.data);
+            buf_free(&b);
+            if (add != 0) {
+                warn_cgc("cannot build fetch refspec");
+                goto done;
+            }
+        }
+    }
+
     int ls_rc = local ? local_ls_refs(url, &refs)
                       : protocol_ls_refs(url, &refs);
     if (ls_rc != 0) {
@@ -479,14 +581,16 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
         goto done;
     }
 
+    int no_tags = (opts && opts->no_tags) && !mirror;
+    int do_prune = ((opts && opts->prune) || mirror) && !branch_opt;
+
     if (refs.empty) {
         if (pull) {
             warn_cgc("remote repository is empty");
             goto done;
         }
-        if (opts && opts->prune && !branch_opt &&
-            repo_prune_remote_refs(gitdir, &refs, remote) != 0)
-            warn_cgc("could not prune stale remote-tracking refs");
+        if (do_prune && repo_prune_mappings(gitdir, &spec, NULL, 0) != 0)
+            warn_cgc("could not prune stale refs");
         if (!cgc_quiet)
             fprintf(stderr, "From %s\n", url);
         rc = 0;
@@ -499,12 +603,15 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
     }
 
     /* With --branch, fetch only that branch (plus tags unless --no-tags).
-     * --no-tags on its own removes tags from the request. The Refs are
-     * shallow copies owned by `refs`. */
+     * --no-tags on its own removes tags from the request. Otherwise the
+     * configured refspecs decide what is fetched. The Refs are shallow copies
+     * owned by `refs`. */
     const RemoteRefs *active = &refs;
-    int no_tags = opts && opts->no_tags;
-    if (branch_opt || no_tags) {
+    if (branch_opt || no_tags || spec.count > 0) {
+        /* Keep the protocol/capability fields; only the ref list is filtered. */
+        filtered = refs;
         filtered.refs = xcalloc(refs.count, sizeof(Ref));
+        filtered.count = 0;
         for (size_t i = 0; i < refs.count; i++) {
             const Ref *r = &refs.refs[i];
             int is_tag = strncmp(r->name, "refs/tags/", 10) == 0;
@@ -512,6 +619,8 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
                 !is_tag)
                 continue;
             if (no_tags && is_tag)
+                continue;
+            if (!repo_refspec_selects(&spec, r->name, !no_tags))
                 continue;
             filtered.refs[filtered.count++] = *r;
         }
@@ -534,85 +643,138 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
         goto done;
     }
 
-    report_fetch(gitdir, active, url);
+    const char *pull_source = merge_ref ? merge_ref : target_ref;
 
     if (repo_write_fetch_head(gitdir, active, url,
-                              pull ? target_ref : NULL) != 0)
+                              pull ? pull_source : NULL) != 0)
         warn_cgc("cannot write FETCH_HEAD");
 
-    /* A bare repository has no configured fetch refspec by default. Match
-     * git's behavior: fetch records FETCH_HEAD and leaves refs alone. */
-    if (!worktree) {
+    /* Work out the pull update before touching refs so a refused
+     * fast-forward cannot clobber a local branch through a custom refspec. */
+    unsigned char new_oid[OID_RAW];
+    unsigned char local_oid[OID_RAW];
+    unsigned char switch_oid[OID_RAW];
+    int have_local = 0;
+    int detached = (head_ref == NULL);
+    int up_to_date = 0;
+    int advance = 1;
+
+    if (pull) {
+        const Ref *remote_branch = find_ref(active, pull_source);
+        if (!remote_branch) {
+            warn_cgc("remote branch '%s' not found",
+                     pull_source ? pull_source : "(unknown)");
+            goto done;
+        }
+        memcpy(new_oid, remote_branch->oid, OID_RAW);
+
+        int rr = repo_read_ref(gitdir, target_ref, local_oid);
+        if (rr < 0) {
+            warn_cgc("cannot read '%s'", target_ref);
+            goto done;
+        }
+        have_local = rr == 0;
+
+        if (detached) {
+            memcpy(switch_oid, new_oid, OID_RAW);
+            if (have_local) {
+                int ff = is_ancestor(gitdir, local_oid, new_oid);
+                if (ff < 0) {
+                    warn_cgc("cannot verify that the update is a fast-forward");
+                    goto done;
+                }
+                if (ff) {
+                    memcpy(switch_oid, new_oid, OID_RAW);
+                    advance = memcmp(local_oid, new_oid, OID_RAW) != 0;
+                } else {
+                    int ahead = is_ancestor(gitdir, new_oid, local_oid);
+                    if (ahead != 1) {
+                        warn_cgc("not a fast-forward; refusing to pull "
+                                 "(merge and rebase are not supported)");
+                        goto done;
+                    }
+                    memcpy(switch_oid, local_oid, OID_RAW);
+                    advance = 0;
+                }
+            }
+        } else if (have_local) {
+            if (memcmp(local_oid, new_oid, OID_RAW) == 0) {
+                up_to_date = 1;
+            } else {
+                int ff = is_ancestor(gitdir, local_oid, new_oid);
+                if (ff < 0) {
+                    warn_cgc("cannot verify that the update is a fast-forward");
+                    goto done;
+                }
+                if (!ff) {
+                    int ahead = is_ancestor(gitdir, new_oid, local_oid);
+                    if (ahead != 1) {
+                        warn_cgc("not a fast-forward; refusing to pull "
+                                 "(merge and rebase are not supported)");
+                        goto done;
+                    }
+                    up_to_date = 1;
+                }
+            }
+        }
+    }
+
+    if (spec.count == 0) {
+        /* No refspec (a bare repository without one): FETCH_HEAD only. Map
+         * the refs against an all-refs set so the summary still shows them. */
+        RefspecSet report_spec;
+        refspec_set_init(&report_spec);
+        if (refspec_set_add(&report_spec, "+refs/*:refs/*") == 0 &&
+            repo_map_refspecs(&report_spec, active, 0, &maps, &nmaps) == 0)
+            report_fetch(gitdir, maps, nmaps, remote, url);
+        refspec_set_free(&report_spec);
         rc = 0;
         goto done;
     }
 
-    RefWriteOptions ref_opts;
-    memset(&ref_opts, 0, sizeof(ref_opts));
-    ref_opts.force_tags = opts && opts->force_tags;
-    ref_opts.no_tags = no_tags;
-    if (repo_write_remote_refs(gitdir, active, remote, &ref_opts) != 0) {
-        warn_cgc("cannot update remote refs");
+    if (repo_map_refspecs(&spec, active, !no_tags, &maps, &nmaps) != 0) {
+        warn_cgc("cannot map remote refs");
         goto done;
     }
 
-    if (opts && opts->prune && !branch_opt) {
-        if (repo_prune_remote_refs(gitdir, active, remote) != 0)
-            warn_cgc("could not prune stale remote-tracking refs");
+    report_fetch(gitdir, maps, nmaps, remote, url);
+
+    RefWriteOptions ref_opts;
+    memset(&ref_opts, 0, sizeof(ref_opts));
+    ref_opts.force_tags = (opts && opts->force_tags) || mirror;
+    ref_opts.no_tags = no_tags;
+    if (repo_write_mappings(gitdir, maps, nmaps, &ref_opts) != 0) {
+        warn_cgc("cannot update refs");
+        goto done;
     }
+
+    if (!mirror && refs.default_ref &&
+        strncmp(refs.default_ref, "refs/heads/", 11) == 0) {
+        const char *dst = mapping_dst_for_src(maps, nmaps, refs.default_ref);
+        if (dst) {
+            Buf head_name;
+            buf_init(&head_name);
+            buf_appendf(&head_name, "refs/remotes/%s/HEAD", remote);
+            if (repo_write_symref(gitdir, (char *)head_name.data, dst) != 0)
+                warn_cgc("cannot update remote HEAD");
+            buf_free(&head_name);
+        }
+    }
+
+    if (do_prune && repo_prune_mappings(gitdir, &spec, maps, nmaps) != 0)
+        warn_cgc("could not prune stale refs");
 
     if (!pull) {
         rc = 0;
         goto done;
     }
 
-    const Ref *remote_branch = find_ref(active, target_ref);
-    if (!remote_branch) {
-        warn_cgc("remote branch '%s' not found", target_ref);
-        goto done;
-    }
-
-    unsigned char new_oid[OID_RAW];
-    memcpy(new_oid, remote_branch->oid, OID_RAW);
-
-    unsigned char local_oid[OID_RAW];
-    int have_local = repo_read_ref(gitdir, target_ref, local_oid) == 0;
-    int detached = (head_ref == NULL);
-
     if (detached) {
-        /* Switching from a detached HEAD to a branch. Check out the branch tip
-         * without discarding local commits: fast-forward it when possible, use
-         * the local tip when it is ahead, and refuse when they have diverged. */
-        unsigned char target_oid[OID_RAW];
-        memcpy(target_oid, new_oid, OID_RAW);
-        int advance = 1;
-
-        if (have_local) {
-            int ff = is_ancestor(gitdir, local_oid, new_oid);
-            if (ff < 0) {
-                warn_cgc("cannot verify that the update is a fast-forward");
-                goto done;
-            }
-            if (ff) {
-                memcpy(target_oid, new_oid, OID_RAW);
-                advance = memcmp(local_oid, new_oid, OID_RAW) != 0;
-            } else {
-                int ahead = is_ancestor(gitdir, new_oid, local_oid);
-                if (ahead != 1) {
-                    warn_cgc("not a fast-forward; refusing to pull "
-                             "(merge and rebase are not supported)");
-                    goto done;
-                }
-                memcpy(target_oid, local_oid, OID_RAW);
-                advance = 0;
-            }
-        }
-
-        int moving = memcmp(head_oid, target_oid, OID_RAW) != 0;
+        int moving = memcmp(head_oid, switch_oid, OID_RAW) != 0;
         if (moving && repo_write_orig_head(gitdir, head_oid) != 0)
             warn_cgc("cannot write ORIG_HEAD");
         if (moving &&
-            checkout_update(gitdir, worktree, head_oid, target_oid) != 0) {
+            checkout_update(gitdir, worktree, head_oid, switch_oid) != 0) {
             warn_cgc("could not update the working tree");
             goto done;
         }
@@ -636,31 +798,11 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
         goto done;
     }
 
-    if (have_local && memcmp(local_oid, new_oid, OID_RAW) == 0) {
+    if (up_to_date) {
         if (!cgc_quiet)
             fprintf(stderr, "Already up to date.\n");
         rc = 0;
         goto done;
-    }
-
-    if (have_local) {
-        int ff = is_ancestor(gitdir, local_oid, new_oid);
-        if (ff < 0) {
-            warn_cgc("cannot verify that the update is a fast-forward");
-            goto done;
-        }
-        if (!ff) {
-            int ahead = is_ancestor(gitdir, new_oid, local_oid);
-            if (ahead == 1) {
-                if (!cgc_quiet)
-                    fprintf(stderr, "Already up to date.\n");
-                rc = 0;
-                goto done;
-            }
-            warn_cgc("not a fast-forward; refusing to pull "
-                     "(merge and rebase are not supported)");
-            goto done;
-        }
     }
 
     if (have_local) {
@@ -707,10 +849,14 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
 done:
     if (have_filter)
         free(filtered.refs);
+    ref_mappings_free(maps, nmaps);
+    refspec_set_free(&spec);
+    remote_config_free(&cfg);
     free(url);
     free(remote);
     free(head_ref);
     free(target_ref);
+    free(merge_alloc);
     free(haves);
     remote_refs_free(&refs);
     free(gitdir);

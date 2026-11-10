@@ -4,7 +4,8 @@
 typedef struct {
     int force_tags; /* overwrite conflicting local tags */
     int no_tags;    /* do not fetch or update tags */
-    int prune;      /* delete stale refs under refs/remotes/origin */
+    int prune;      /* delete stale refs under fetch refspec namespaces */
+    const char *remote; /* remote name, or NULL to use the branch/config default */
 } UpdateOptions;
 
 /* Fetch remote updates for the repository containing start_dir. When pull is

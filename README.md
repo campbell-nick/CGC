@@ -16,10 +16,14 @@ loose objects and refs, checks out the working tree, and writes a Git index.
 It can also `fetch`, `pull`, and `update` an existing clone, negotiating with
 `have` lines and fast-forwarding the current branch.
 
-Clones can be bare (`--bare`), skip the working-tree checkout (`--no-checkout`),
-use a custom remote name (`--origin <name>`), or skip tags (`--no-tags`). Fetch
-and pull follow the first remote configured in `.git/config`, so non-`origin`
-remote names update `refs/remotes/<name>/*`.
+Clones can be bare (`--bare`), mirror every ref (`--mirror`), skip the
+working-tree checkout (`--no-checkout`), use a custom remote name (`--origin
+<name>`), or skip tags (`--no-tags`). Fetch and pull honor each remote's
+configured fetch refspecs (including force, wildcard, and negative refspecs),
+select a remote with `--remote <name>`, and fall back to `branch.<name>.remote`,
+`origin`, or the first configured remote. Non-`origin` remotes update
+`refs/remotes/<name>/*`, and a mirror fetch copies `refs/*` verbatim and prunes
+deleted refs.
 
 Besides smart HTTP, `cgc` clones and fetches from local repositories by reading
 their refs and objects directly, including bare repositories, `file://` URLs,
@@ -27,9 +31,9 @@ and linked worktrees. It never invokes `git`.
 
 Fetch and pull update remote-tracking refs and tags safely: a local tag that
 differs from the remote is refused unless `--force` is given, `--no-tags` skips
-tags, and `--prune` removes remote-tracking refs for deleted branches (including
-packed refs). Pulls preserve unrelated staged changes and index flags such as
-`skip-worktree` and `assume-unchanged`. `FETCH_HEAD` and `ORIG_HEAD` are
+tags, and `--prune` removes stale refs under the fetch refspec namespaces
+(including packed refs). Pulls preserve unrelated staged changes and index flags
+such as `skip-worktree` and `assume-unchanged`. `FETCH_HEAD` and `ORIG_HEAD` are
 maintained, and ref, index, and metadata writes use atomic renames.
 
 ```sh

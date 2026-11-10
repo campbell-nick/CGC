@@ -43,6 +43,20 @@ All notable changes to this project are documented here. The format follows
   v2, including v0 ref advertisement parsing (peeled tags, `symref=HEAD`,
   empty-repository pseudo-refs), sideband demultiplexing with a raw-pack
   fallback, shallow `--depth` fetches, and `have`-line negotiation.
+- Configurable fetch refspecs for `fetch`, `pull`, and `update`, supporting
+  force (`+`), wildcard (`*`), and negative (`^`) refspecs. The standard
+  `+refs/heads/*:refs/remotes/<remote>/*` mapping is used when a non-bare
+  remote has no configured fetch line.
+- Multiple remotes: `--remote <name>` selects a remote, and the default is
+  resolved from `branch.<name>.remote`, then `origin`, then the first configured
+  remote. Pull uses `branch.<name>.merge` as its source when configured.
+- Clone `--mirror` to create a bare repository that copies every advertised ref
+  verbatim (`refs/*:refs/*`), records `mirror = true`, forces tag updates, and
+  prunes refs that disappear upstream. Mirror ignores `--no-tags` and
+  `--single-branch` and rejects `--depth`.
+- `--prune` generalized to the destination namespaces of the configured fetch
+  refspecs, including wildcard mappings; symrefs such as
+  `refs/remotes/<remote>/HEAD` are preserved.
 - `--prune` to delete remote-tracking refs for branches deleted upstream,
   including entries in `packed-refs`.
 - `.git/FETCH_HEAD` for fetch and pull, and `.git/ORIG_HEAD` before a pull
@@ -57,6 +71,12 @@ All notable changes to this project are documented here. The format follows
   and local `--depth` rejection.
 - End-to-end coverage for protocol v0 clone, peeled tags, shallow clones, empty
   repositories, fetch, and pull.
+- End-to-end coverage for `--mirror` clone/fetch/prune, local mirror sources,
+  custom fetch refspecs, multiple remotes with `--remote`, default
+  branch-remote selection, unknown remote rejection, and `--prune` preserving
+  `origin/HEAD`.
+- Unit coverage for refspec parsing, force and wildcard mapping, destination
+  matching, negative refspecs, and invalid refspec rejection.
 
 ### Changed
 
@@ -72,6 +92,11 @@ All notable changes to this project are documented here. The format follows
   failures are reported instead of ignored.
 - An empty fetch pack is treated as "already up to date" instead of an error,
   and no receive/delta summary is printed for a no-op fetch.
+- `fetch`, `pull`, and `update` now honor each remote's configured fetch
+  refspecs and select the remote from `--remote`, `branch.<name>.remote`,
+  `origin`, or the first configured remote, instead of always using the first
+  remote. A bare repository with no fetch refspec still records only
+  `FETCH_HEAD`, but its summary now lists the fetched refs.
 
 ## [0.2.0] - 2026-11-09
 

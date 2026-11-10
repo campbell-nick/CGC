@@ -96,19 +96,31 @@ Expands to
 .SH SUBCOMMANDS
 .TP
 .B fetch
-Fetch missing objects and update
-.B refs/remotes/\fIremote\fR/*
-and tags, where
-.I remote
-is the first remote configured in the repository (usually
-.BR origin ).
+Fetch missing objects and update the refs selected by the remote's fetch
+refspec and tags.
+By default a non-bare remote maps branches to
+.BR refs/remotes/\fIremote\fR/* .
+The remote is chosen with
+.BR \-\-remote ,
+then from
+.B branch.\fIname\fB.remote
+for the current branch, then
+.BR origin ,
+then the first configured remote.
+Configured fetch refspecs support force
+.RB ( + ),
+wildcard
+.RB ( * ),
+and negative
+.RB ( ^ )
+forms.
 Local branches and the working tree are left untouched.
 .B .git/FETCH_HEAD
-records what was fetched. In a bare repository,
+records what was fetched. In a bare repository with no fetch refspec,
 .B fetch
 writes only
 .B FETCH_HEAD
-and leaves refs unchanged, matching Git's default without a fetch refspec.
+and leaves refs unchanged, matching Git's default.
 When the remote is a local path or
 .B file://
 URL, objects are copied directly from the source repository, including
@@ -119,7 +131,10 @@ lines.
 .TP
 .B pull
 Fetch, then fast-forward the current branch and update the working tree and
-index. Refuses to run when the remote branch is not a descendant of the local
+index. Uses
+.B branch.\fIname\fB.merge
+as the source when configured, falling back to the current branch name.
+Refuses to run when the remote branch is not a descendant of the local
 branch, when an affected file has local modifications, or when an untracked
 path would be overwritten. Staged changes on paths the update does not touch
 are preserved; a staged change to an affected path is refused unless it already
@@ -156,12 +171,14 @@ to allow that.
 .B \-\-no\-tags
 skips tags entirely.
 .B \-\-prune
-deletes remote-tracking refs for branches deleted upstream, including entries
-in
+deletes refs under the destination namespaces of the configured fetch refspecs
+that the remote no longer advertises, including entries in
 .BR packed\-refs ;
-it is skipped when
+symrefs such as
+.B refs/remotes/\fIremote\fR/HEAD
+are preserved. It is skipped when
 .B \-\-branch
-limits the fetch.
+limits the fetch. A mirror fetch implies pruning.
 .SH OPTIONS
 .TP
 .B \-\-host \fIhost\fR
@@ -215,13 +232,23 @@ does not make
 accept a non-fast-forward update. Fetch, pull, and update only.
 .TP
 .B \-\-prune
-Delete remote-tracking refs under
-.B refs/remotes/\fIremote\fR
+Delete refs under the destination namespaces of the configured fetch refspecs
 that the remote no longer advertises, including entries in
 .BR packed\-refs .
-Skipped when
+Symrefs such as
+.B refs/remotes/\fIremote\fR/HEAD
+are preserved. Skipped when
 .B \-\-branch
 limits the fetch. Fetch, pull, and update only.
+.TP
+.B \-\-remote \fIname\fR
+Use the remote named
+.I name
+instead of the configured default. The default is
+.B branch.\fIbranch\fB.remote
+for the current branch, then
+.BR origin ,
+then the first configured remote. Fetch, pull, and update only.
 .TP
 .B \-\-depth \fIn\fR
 Create a shallow clone with history truncated to
@@ -249,6 +276,22 @@ with no working tree or index. When
 is omitted, the derived name keeps a
 .B .git
 suffix. Clone only.
+.TP
+.B \-\-mirror
+Create a bare repository that copies every advertised ref verbatim
+.RB ( refs/*:refs/* ),
+records
+.B mirror = true
+and a refs-wide fetch refspec, forces tag updates, and prunes refs that
+disappear upstream on later fetches. Implies
+.BR \-\-bare ,
+ignores
+.B \-\-no\-tags
+and
+.BR \-\-single\-branch ,
+and rejects
+.BR \-\-depth .
+Clone only.
 .TP
 .B \-\-no\-checkout
 Write
@@ -285,6 +328,7 @@ cgc https://github.com/torvalds/linux.git
 cgc \-\-host git.example.com team/repo
 CGC_DEFAULT_HOST=git.example.com cgc team/repo
 cgc \-\-bare gh:owner/repo
+cgc \-\-mirror gh:owner/repo
 cgc \-\-no\-checkout gh:owner/repo
 cgc \-\-origin upstream gh:owner/repo
 cgc \-\-no\-tags gh:owner/repo
@@ -294,6 +338,7 @@ cd repo && cgc fetch
 cd repo && cgc pull
 cd repo && cgc fetch \-\-prune
 cd repo && cgc fetch \-\-no\-tags
+cd repo && cgc fetch \-\-remote backup
 cgc pull \-\-branch main /path/to/repo
 .fi
 .SH OUTPUT
@@ -399,9 +444,7 @@ can check out a branch when that is a fast-forward or the local tip is ahead);
 .B \-\-prune
 is skipped when
 .B \-\-branch
-limits the fetch; custom refspecs, multiple remotes, and
-.B \-\-mirror
-are not supported; bare fetch records only
+limits the fetch; a bare repository with no fetch refspec records only
 .BR FETCH_HEAD ;
 tags are fetched in full rather than Git's
 reachability-based auto-follow; submodules are not cloned or updated; no partial

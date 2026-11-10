@@ -488,4 +488,115 @@ if "$ROOT/cgc" --depth 1 "$WORK/src" "$WORK/localdepth" >/dev/null 2>&1; then
 fi
 test ! -e "$WORK/localdepth"
 
+# ---------------------------------------------------------------------------
+# mirror, custom refspecs, multiple remotes, and pruning
+# ---------------------------------------------------------------------------
+
+# --mirror creates a bare repository with refs copied verbatim and a
+# refs-wide fetch refspec.
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+"$ROOT/cgc" -q --mirror "$URL" "$WORK/mirror.git"
+test -d "$WORK/mirror.git/objects"
+test ! -e "$WORK/mirror.git/.git"
+test "$(git -C "$WORK/mirror.git" rev-parse --is-bare-repository)" = true
+test "$(git -C "$WORK/mirror.git" rev-parse refs/heads/main)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/main)"
+test "$(git -C "$WORK/mirror.git" rev-parse refs/heads/dev)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/dev)"
+test "$(git -C "$WORK/mirror.git" rev-parse refs/tags/v1)" = \
+     "$(git -C "$WORK/src" rev-parse refs/tags/v1)"
+test -z "$(git -C "$WORK/mirror.git" for-each-ref \
+     --format='%(refname)' refs/remotes)"
+grep -Fq 'fetch = +refs/*:refs/*' "$WORK/mirror.git/config"
+grep -Fq 'mirror = true' "$WORK/mirror.git/config"
+git -C "$WORK/mirror.git" fsck --full
+
+printf 'mirror fetch\n' > "$WORK/src/mirror-fetch.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "mirror fetch"
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+MIRROR_HEAD=$(git -C "$WORK/src" rev-parse HEAD)
+(cd "$WORK/mirror.git" && "$ROOT/cgc" fetch -q)
+test "$(git -C "$WORK/mirror.git" rev-parse refs/heads/main)" = "$MIRROR_HEAD"
+test "$(git -C "$WORK/mirror.git" rev-parse HEAD)" = "$MIRROR_HEAD"
+git -C "$WORK/mirror.git" fsck --full
+
+# A mirror fetch prunes branches that disappeared upstream.
+git -C "$WORK/src" branch mirror-temp main
+git -C "$WORK/src" push -q "$WORK/server/repo.git" mirror-temp
+(cd "$WORK/mirror.git" && "$ROOT/cgc" fetch -q)
+test "$(git -C "$WORK/mirror.git" rev-parse refs/heads/mirror-temp)" = \
+     "$MIRROR_HEAD"
+git -C "$WORK/server/repo.git" update-ref -d refs/heads/mirror-temp
+git -C "$WORK/src" branch -D mirror-temp >/dev/null
+(cd "$WORK/mirror.git" && "$ROOT/cgc" fetch -q)
+test -z "$(git -C "$WORK/mirror.git" for-each-ref \
+     --format='%(refname)' refs/heads/mirror-temp)"
+
+# A mirror clone also works from a local path.
+"$ROOT/cgc" -q --mirror "$WORK/src" "$WORK/localmirror.git"
+test "$(git -C "$WORK/localmirror.git" rev-parse refs/heads/main)" = \
+     "$MIRROR_HEAD"
+test -z "$(git -C "$WORK/localmirror.git" for-each-ref \
+     --format='%(refname)' refs/remotes)"
+
+# A configured fetch refspec controls where refs are written. The standard
+# remote-tracking namespace is left untouched.
+"$ROOT/cgc" -q "$URL" "$WORK/customrefspec"
+CUSTOM_BASE=$(git -C "$WORK/customrefspec" rev-parse refs/remotes/origin/main)
+printf 'custom refspec\n' > "$WORK/src/custom.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "custom refspec"
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+CUSTOM_HEAD=$(git -C "$WORK/src" rev-parse HEAD)
+git -C "$WORK/customrefspec" config --replace-all remote.origin.fetch \
+    '+refs/heads/*:refs/custom/*'
+(cd "$WORK/customrefspec" && "$ROOT/cgc" fetch -q)
+test "$(git -C "$WORK/customrefspec" rev-parse refs/custom/main)" = \
+     "$CUSTOM_HEAD"
+test "$(git -C "$WORK/customrefspec" rev-parse refs/custom/dev)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/dev)"
+test "$(git -C "$WORK/customrefspec" rev-parse refs/remotes/origin/main)" = \
+     "$CUSTOM_BASE"
+
+# Multiple remotes: --remote selects one, and the default follows
+# branch.<name>.remote.
+git -C "$WORK/customrefspec" remote add backup "$URL"
+(cd "$WORK/customrefspec" && "$ROOT/cgc" fetch -q --remote backup)
+test "$(git -C "$WORK/customrefspec" rev-parse refs/remotes/backup/main)" = \
+     "$CUSTOM_HEAD"
+
+printf 'multiple remotes\n' > "$WORK/src/multi.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "multiple remotes"
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+MULTI_HEAD=$(git -C "$WORK/src" rev-parse HEAD)
+(cd "$WORK/customrefspec" && "$ROOT/cgc" fetch -q)
+test "$(git -C "$WORK/customrefspec" rev-parse refs/custom/main)" = \
+     "$MULTI_HEAD"
+test "$(git -C "$WORK/customrefspec" rev-parse refs/remotes/backup/main)" = \
+     "$CUSTOM_HEAD"
+
+if (cd "$WORK/customrefspec" && \
+        "$ROOT/cgc" fetch -q --remote missing >/dev/null 2>&1); then
+    echo "smoke: fetch accepted an unknown remote" >&2
+    exit 1
+fi
+
+# --prune removes stale remote-tracking branches but keeps the remote HEAD
+# symref.
+"$ROOT/cgc" -q "$URL" "$WORK/prune"
+git -C "$WORK/src" branch prune-me main
+git -C "$WORK/src" push -q "$WORK/server/repo.git" prune-me
+(cd "$WORK/prune" && "$ROOT/cgc" fetch -q)
+test "$(git -C "$WORK/prune" rev-parse refs/remotes/origin/prune-me)" = \
+     "$MULTI_HEAD"
+git -C "$WORK/server/repo.git" update-ref -d refs/heads/prune-me
+git -C "$WORK/src" branch -D prune-me >/dev/null
+(cd "$WORK/prune" && "$ROOT/cgc" fetch -q --prune)
+test -z "$(git -C "$WORK/prune" for-each-ref \
+     --format='%(refname)' refs/remotes/origin/prune-me)"
+test "$(git -C "$WORK/prune" symbolic-ref refs/remotes/origin/HEAD)" = \
+     refs/remotes/origin/main
+
 echo "smoke test passed"

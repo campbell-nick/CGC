@@ -12,7 +12,10 @@
 - `--depth <n>` shallow clones (writes `.git/shallow`), with `--single-branch`
 - `--bare` and `--no-checkout` clones
 - `--origin <name>` to name the remote, including non-`origin` remote-tracking
-  refs; `fetch`, `pull`, and `update` use the first configured remote
+  refs; multiple remotes are supported, with `--remote <name>` selection and
+  `branch.<name>.remote`/`branch.<name>.merge` resolution
+- Configurable fetch refspecs, including force (`+`), wildcard, and negative
+  (`^`) refspecs; `--mirror` clones and fetches with `refs/*:refs/*`
 - `fetch`, `pull`, and `update` for existing clones, using `have` lines so only
   missing objects are transferred
 - Fast-forward-only pulls that preserve unchanged files and refuse to overwrite
@@ -52,9 +55,9 @@
   branch, fast-forwarding it when possible and refusing divergence.
 - `--prune` is skipped when `--branch` limits the fetch, because the omitted
   branches would otherwise look deleted.
-- In a bare repository, `fetch` records `FETCH_HEAD` but does not update refs
-  because there is no configured fetch refspec; `pull` is refused. Custom
-  refspecs, multiple remotes, and `--mirror` are not supported yet.
+- In a bare repository with no fetch refspec, `fetch` records `FETCH_HEAD` but
+  does not update refs; `pull` is refused. A bare repository configured with a
+  fetch refspec updates refs normally.
 - Pull reads `.git/index` (versions 2 and 3) to detect staged changes and
   preserve stat data and flags; other index versions are rejected.
 - Submodules are represented as empty directories; they are not cloned or
@@ -70,9 +73,8 @@
 - Stream packfiles and objects to bound memory use
 - Keep the pack and write a `.idx` instead of exploding into loose objects
 - Merge/rebase support and shallow fetch (`--deepen`)
-- `--mirror`, configurable refspecs, and multiple remotes
 - Connect/read timeouts, retries with backoff, and proxy support
-- Protocol v0 fallback and SSH transport
+- SSH transport
 - Partial clone
 - Submodule clone and update
 - Parallel batch cloning from a list or config

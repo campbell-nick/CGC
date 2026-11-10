@@ -40,11 +40,13 @@ cgc https://github.com/torvalds/linux.git
 cgc --host git.example.com team/repo
 CGC_DEFAULT_HOST=git.example.com cgc team/repo
 cgc --bare gh:owner/repo
+cgc --mirror gh:owner/repo
 cgc --no-checkout gh:owner/repo
 cgc --origin upstream gh:owner/repo
 cgc --no-tags gh:owner/repo
 cgc /srv/git/project.git
 cgc file:///srv/git/project.git project-copy
+cd repo && cgc fetch --remote backup
 ```
 
 ## Subcommands
@@ -55,17 +57,28 @@ cgc pull   [options] [directory]
 cgc update [options] [directory]
 ```
 
-`fetch` downloads new objects and updates `refs/remotes/<remote>/*` and tags
-without touching local branches or the working tree. `pull` (and its alias
-`update`) does the same, then fast-forwards the current branch and updates the
-working tree and index. The remote name and URL are read from the first remote
-section in `.git/config`, so clones made with `--origin <name>` keep working.
-`directory` defaults to the current directory; parent directories are searched
-for the repository.
+`fetch` downloads new objects and updates the refs selected by the remote's
+fetch refspec (by default `refs/remotes/<remote>/*`) and tags without touching
+local branches or the working tree. `pull` (and its alias `update`) does the
+same, then fast-forwards the current branch and updates the working tree and
+index. `directory` defaults to the current directory; parent directories are
+searched for the repository.
 
-In a bare repository, `fetch` writes `FETCH_HEAD` and leaves refs unchanged,
-matching Git's default when no fetch refspec is configured. `pull` is refused
-in a bare repository because there is no working tree to update.
+The remote is chosen from `--remote <name>` when given, otherwise from
+`branch.<name>.remote` for the current branch, then `origin`, then the first
+remote configured in `.git/config`. This keeps clones made with
+`--origin <name>` working, and lets a repository fetch from several remotes.
+
+Each remote's `fetch` configuration lines are honored. A refspec of the form
+`[+]src:dst` maps a remote ref to a local ref; `+` allows a non-fast-forward
+update, a trailing `*` matches one path component, and a leading `^` is a
+negative refspec that excludes matching refs. When a non-bare remote has no
+`fetch` line, `cgc` uses `+refs/heads/*:refs/remotes/<remote>/*`. Tags are
+still written separately when no refspec covers them.
+
+In a bare repository with no configured fetch refspec, `fetch` writes
+`FETCH_HEAD` and leaves refs unchanged, matching Git's default. `pull` is
+refused in a bare repository because there is no working tree to update.
 
 When the configured remote is a local path or `file://` URL, `fetch` and `pull`
 copy objects directly from the source repository, including unpacking any
@@ -84,15 +97,19 @@ selects the branch for `pull`/`update`. Pull refuses to switch away from an
 existing branch; check out the target branch first. It can create and check out
 a branch when `HEAD` is unborn or detached. From a detached `HEAD` it switches
 to the branch, fast-forwarding it when possible, keeping the local tip when it
-is ahead, and refusing when local and remote have diverged.
+is ahead, and refusing when local and remote have diverged. Without `--branch`,
+`pull` uses `branch.<name>.merge` as the source when it is configured and falls
+back to the current branch name.
 
 Tags are fetched by default. An existing local tag is never overwritten when
 the remote tag points at a different object; use `--force` to allow that.
 `--force` only relaxes tag clobber protection; pull remains fast-forward-only.
-`--no-tags` skips tags entirely. `--prune` deletes remote-tracking refs for
-branches deleted upstream, including entries in `packed-refs`; it is skipped
-when `--branch` limits the fetch. `fetch` and `pull` write `.git/FETCH_HEAD`,
-and `pull` writes `.git/ORIG_HEAD` before moving `HEAD`.
+`--no-tags` skips tags entirely. `--prune` deletes refs under the destination
+namespaces of the configured fetch refspecs when the remote no longer
+advertises them, including entries in `packed-refs`. Symrefs such as
+`refs/remotes/<remote>/HEAD` are preserved. Pruning is skipped when `--branch`
+limits the fetch. `fetch` and `pull` write `.git/FETCH_HEAD`, and `pull` writes
+`.git/ORIG_HEAD` before moving `HEAD`.
 
 ## Options
 
@@ -108,13 +125,15 @@ and `pull` writes `.git/ORIG_HEAD` before moving `HEAD`.
 --tags          fetch and update all advertised tags (the default)
 --no-tags       do not fetch or update tags
 --force         overwrite a local tag that differs from the remote
---prune         delete stale refs under refs/remotes/<remote>
+--prune         delete stale refs under the fetch refspec destination namespaces
+--remote <name> use <name> instead of the configured default remote
 --depth <n>     create a shallow clone with history truncated to n commits
                 (HTTP sources only; rejected for local repositories)
 --single-branch clone only the history of one branch
 --no-single-branch
                 fetch all branches (default unless --depth is given)
 --bare          create a bare repository (no working tree or index)
+--mirror        mirror all refs into a bare repository (implies --bare)
 --no-checkout   write refs and config but do not check out files
 --origin <name> name the remote (default origin)
 -q, --quiet     suppress progress messages
@@ -123,16 +142,21 @@ and `pull` writes `.git/ORIG_HEAD` before moving `HEAD`.
 ```
 
 `--host`, `--depth`, `--single-branch`, `--no-single-branch`, `--bare`,
-`--no-checkout`, and `--origin` are only valid for cloning. `--tags`, `--force`,
-and `--prune` are only valid for `fetch`, `pull`, and `update`. `--no-tags` is
-valid for cloning and for `fetch`, `pull`, and `update`.
+`--mirror`, `--no-checkout`, and `--origin` are only valid for cloning.
+`--tags`, `--force`, `--prune`, and `--remote` are only valid for `fetch`,
+`pull`, and `update`. `--no-tags` is valid for cloning and for `fetch`, `pull`,
+and `update`.
 
 `--bare` stores refs, objects, and configuration directly in the destination
-instead of a `.git` subdirectory. `--no-checkout` still writes `HEAD`, refs,
-and configuration but leaves the index and working tree empty; `git status`
-will therefore report the files as deleted until a checkout is performed.
-`--origin` is validated and used consistently in config sections, branch
-upstream settings, and remote-tracking refs.
+instead of a `.git` subdirectory. `--mirror` also implies `--bare`, copies all
+advertised refs verbatim (`fetch = +refs/*:refs/*`), records `mirror = true`,
+forces tag updates, and prunes refs that disappear upstream on later fetches.
+It ignores `--no-tags` and `--single-branch`, and rejects `--depth`.
+`--no-checkout` still writes `HEAD`, refs, and configuration but leaves the
+index and working tree empty; `git status` will therefore report the files as
+deleted until a checkout is performed. `--origin` is validated and used
+consistently in config sections, branch upstream settings, and remote-tracking
+refs.
 
 ## Output
 

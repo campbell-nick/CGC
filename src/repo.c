@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -166,6 +167,11 @@ static int write_symref_file(const char *gitdir, const char *name,
     return rc;
 }
 
+int repo_write_symref(const char *gitdir, const char *name, const char *target)
+{
+    return write_symref_file(gitdir, name, target);
+}
+
 int repo_write_refs(const char *gitdir, const RemoteRefs *refs,
                     const char *remote)
 {
@@ -276,13 +282,16 @@ int repo_set_head_detached(const char *gitdir,
 }
 
 int repo_write_config(const char *gitdir, const char *url,
-                      const char *default_ref, const char *remote, int bare)
+                      const char *default_ref, const char *remote, int bare,
+                      int mirror)
 {
     if (!remote)
         remote = "origin";
     if (!repo_remote_name_is_valid(remote) || !text_is_safe(url) ||
         !text_is_safe(default_ref))
         return -1;
+    if (mirror)
+        bare = 1;
 
     Buf b;
     buf_init(&b);
@@ -295,7 +304,9 @@ int repo_write_config(const char *gitdir, const char *url,
     if (!bare)
         buf_appendf(&b, "\tlogallrefupdates = true\n");
     buf_appendf(&b, "[remote \"%s\"]\n\turl = %s\n", remote, url);
-    if (!bare) {
+    if (mirror) {
+        buf_appendf(&b, "\tfetch = +refs/*:refs/*\n\tmirror = true\n");
+    } else if (!bare) {
         buf_appendf(&b, "\tfetch = +refs/heads/*:refs/remotes/%s/*\n",
                     remote);
         if (default_ref && strncmp(default_ref, "refs/heads/", 11) == 0)
@@ -314,7 +325,7 @@ int repo_write_config(const char *gitdir, const char *url,
 }
 
 /* ------------------------------------------------------------------------- */
-/* Ref and config reading                                                    */
+/* Config reading                                                            */
 /* ------------------------------------------------------------------------- */
 
 static char *trim_ws(char *s)
@@ -327,6 +338,747 @@ static char *trim_ws(char *s)
     *end = '\0';
     return s;
 }
+
+typedef struct {
+    char *section;
+    char *subsection;
+    char *key;
+    char *value;
+} ConfigEntry;
+
+typedef struct {
+    ConfigEntry *entries;
+    size_t count;
+    size_t cap;
+} ConfigFile;
+
+static void config_file_free(ConfigFile *cf)
+{
+    for (size_t i = 0; i < cf->count; i++) {
+        free(cf->entries[i].section);
+        free(cf->entries[i].subsection);
+        free(cf->entries[i].key);
+        free(cf->entries[i].value);
+    }
+    free(cf->entries);
+    memset(cf, 0, sizeof(*cf));
+}
+
+/* Parse "[section \"subsection\"]". line points at '['. */
+static int config_parse_section(const char *line, char **out_section,
+                                char **out_subsection)
+{
+    const char *end = strchr(line, ']');
+    if (!end)
+        return -1;
+
+    const char *tail = end + 1;
+    while (*tail == ' ' || *tail == '\t' || *tail == '\r')
+        tail++;
+    if (*tail)
+        return -1;
+
+    const char *p = line + 1;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    const char *name_end = p;
+    while (name_end < end && *name_end != ' ' && *name_end != '\t')
+        name_end++;
+    if (name_end == p)
+        return -1;
+
+    char *section = xstrndup(p, (size_t)(name_end - p));
+    char *subsection = NULL;
+
+    const char *q = name_end;
+    while (*q == ' ' || *q == '\t')
+        q++;
+    if (q < end) {
+        if (*q != '"')
+            goto fail;
+        q++;
+        const char *sub_end = strchr(q, '"');
+        if (!sub_end || sub_end > end)
+            goto fail;
+        subsection = xstrndup(q, (size_t)(sub_end - q));
+        const char *r = sub_end + 1;
+        while (*r == ' ' || *r == '\t')
+            r++;
+        if (r != end)
+            goto fail;
+    }
+
+    *out_section = section;
+    *out_subsection = subsection;
+    return 0;
+
+fail:
+    free(section);
+    free(subsection);
+    return -1;
+}
+
+/* Read .git/config into a flat list of key/value entries. Returns 0 on
+ * success, -1 on I/O or syntax errors. */
+static int config_read(const char *gitdir, ConfigFile *cf)
+{
+    memset(cf, 0, sizeof(*cf));
+
+    char *path = path_join(gitdir, "config");
+    Buf b;
+    buf_init(&b);
+    if (read_file(path, &b) != 0) {
+        buf_free(&b);
+        free(path);
+        return -1;
+    }
+    free(path);
+
+    char *section = NULL;
+    char *subsection = NULL;
+    int rc = 0;
+    char *save = NULL;
+    for (char *line = strtok_r((char *)b.data, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        size_t len = strlen(line);
+        while (len > 0 && line[len - 1] == '\r')
+            line[--len] = '\0';
+
+        char *s = trim_ws(line);
+        if (!*s || *s == '#' || *s == ';')
+            continue;
+
+        if (*s == '[') {
+            char *new_section = NULL;
+            char *new_subsection = NULL;
+            if (config_parse_section(s, &new_section, &new_subsection) != 0) {
+                rc = -1;
+                break;
+            }
+            free(section);
+            free(subsection);
+            section = new_section;
+            subsection = new_subsection;
+            continue;
+        }
+        if (!section)
+            continue;
+
+        char *key = s;
+        char *value = (char *)"true";
+        char *eq = strchr(s, '=');
+        if (eq) {
+            *eq = '\0';
+            key = trim_ws(s);
+            value = trim_ws(eq + 1);
+        }
+        if (!*key) {
+            rc = -1;
+            break;
+        }
+
+        if (cf->count == cf->cap) {
+            cf->cap = cf->cap ? cf->cap * 2 : 16;
+            cf->entries =
+                xrealloc(cf->entries, cf->cap * sizeof(ConfigEntry));
+        }
+        ConfigEntry *e = &cf->entries[cf->count++];
+        e->section = xstrdup(section);
+        e->subsection = subsection ? xstrdup(subsection) : NULL;
+        e->key = xstrdup(key);
+        e->value = xstrdup(value);
+    }
+
+    free(section);
+    free(subsection);
+    buf_free(&b);
+    if (rc != 0)
+        config_file_free(cf);
+    return rc;
+}
+
+static int parse_bool(const char *value, int *out)
+{
+    if (!value)
+        return -1;
+    if (strcasecmp(value, "true") == 0 || strcasecmp(value, "yes") == 0 ||
+        strcasecmp(value, "on") == 0 || strcmp(value, "1") == 0) {
+        *out = 1;
+        return 0;
+    }
+    if (strcasecmp(value, "false") == 0 || strcasecmp(value, "no") == 0 ||
+        strcasecmp(value, "off") == 0 || strcmp(value, "0") == 0) {
+        *out = 0;
+        return 0;
+    }
+    return -1;
+}
+
+void remote_config_free(RemoteConfig *rc)
+{
+    if (!rc)
+        return;
+    free(rc->name);
+    free(rc->url);
+    for (size_t i = 0; i < rc->nfetch; i++)
+        free(rc->fetch[i]);
+    free(rc->fetch);
+    memset(rc, 0, sizeof(*rc));
+}
+
+int repo_read_remote_config(const char *gitdir, const char *name,
+                            RemoteConfig *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!repo_remote_name_is_valid(name))
+        return -1;
+
+    ConfigFile cf;
+    if (config_read(gitdir, &cf) != 0)
+        return -1;
+
+    int found = 0;
+    int rc = 0;
+    for (size_t i = 0; i < cf.count; i++) {
+        ConfigEntry *e = &cf.entries[i];
+        if (strcasecmp(e->section, "remote") != 0 || !e->subsection ||
+            strcmp(e->subsection, name) != 0)
+            continue;
+
+        found = 1;
+        if (strcasecmp(e->key, "url") == 0) {
+            if (!text_is_safe(e->value) || !*e->value) {
+                rc = -1;
+                break;
+            }
+            free(out->url);
+            out->url = xstrdup(e->value);
+        } else if (strcasecmp(e->key, "fetch") == 0) {
+            if (!text_is_safe(e->value) || !*e->value) {
+                rc = -1;
+                break;
+            }
+            out->fetch =
+                xrealloc(out->fetch, (out->nfetch + 1) * sizeof(char *));
+            out->fetch[out->nfetch++] = xstrdup(e->value);
+        } else if (strcasecmp(e->key, "mirror") == 0) {
+            if (parse_bool(e->value, &out->mirror) != 0) {
+                rc = -1;
+                break;
+            }
+        } else if (strcasecmp(e->key, "prune") == 0) {
+            if (parse_bool(e->value, &out->prune) != 0) {
+                rc = -1;
+                break;
+            }
+        }
+    }
+
+    config_file_free(&cf);
+    if (rc != 0) {
+        remote_config_free(out);
+        return -1;
+    }
+    if (!found) {
+        remote_config_free(out);
+        return 1;
+    }
+    out->name = xstrdup(name);
+    if (!out->url) {
+        remote_config_free(out);
+        return -1;
+    }
+    return 0;
+}
+
+static int config_remote_exists(const ConfigFile *cf, const char *name)
+{
+    for (size_t i = 0; i < cf->count; i++) {
+        const ConfigEntry *e = &cf->entries[i];
+        if (strcasecmp(e->section, "remote") == 0 && e->subsection &&
+            strcmp(e->subsection, name) == 0 &&
+            repo_remote_name_is_valid(e->subsection))
+            return 1;
+    }
+    return 0;
+}
+
+int repo_list_remotes(const char *gitdir, char ***out_names, size_t *out_count)
+{
+    *out_names = NULL;
+    *out_count = 0;
+
+    ConfigFile cf;
+    if (config_read(gitdir, &cf) != 0)
+        return -1;
+
+    char **names = NULL;
+    size_t count = 0;
+    for (size_t i = 0; i < cf.count; i++) {
+        ConfigEntry *e = &cf.entries[i];
+        if (strcasecmp(e->section, "remote") != 0 || !e->subsection)
+            continue;
+        if (!repo_remote_name_is_valid(e->subsection))
+            continue;
+
+        int seen = 0;
+        for (size_t j = 0; j < count; j++) {
+            if (strcmp(names[j], e->subsection) == 0) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen) {
+            names = xrealloc(names, (count + 1) * sizeof(char *));
+            names[count++] = xstrdup(e->subsection);
+        }
+    }
+
+    config_file_free(&cf);
+    *out_names = names;
+    *out_count = count;
+    return 0;
+}
+
+int repo_find_remote(const char *gitdir, const char *branch_ref,
+                     char **out_name)
+{
+    *out_name = NULL;
+
+    ConfigFile cf;
+    if (config_read(gitdir, &cf) != 0)
+        return -1;
+
+    int rc = 1;
+    char *branch_remote = NULL;
+
+    if (branch_ref && strncmp(branch_ref, "refs/heads/", 11) == 0) {
+        const char *shortname = branch_ref + 11;
+        for (size_t i = 0; i < cf.count; i++) {
+            ConfigEntry *e = &cf.entries[i];
+            if (strcasecmp(e->section, "branch") != 0 || !e->subsection ||
+                strcmp(e->subsection, shortname) != 0)
+                continue;
+            if (strcasecmp(e->key, "remote") != 0)
+                continue;
+            if (!text_is_safe(e->value) || !*e->value) {
+                rc = -1;
+                goto done;
+            }
+            branch_remote = xstrdup(e->value);
+            break;
+        }
+
+        if (branch_remote && strcmp(branch_remote, ".") != 0 &&
+            config_remote_exists(&cf, branch_remote)) {
+            *out_name = xstrdup(branch_remote);
+            rc = 0;
+            goto done;
+        }
+    }
+
+    if (config_remote_exists(&cf, "origin")) {
+        *out_name = xstrdup("origin");
+        rc = 0;
+        goto done;
+    }
+
+    for (size_t i = 0; i < cf.count; i++) {
+        ConfigEntry *e = &cf.entries[i];
+        if (strcasecmp(e->section, "remote") == 0 && e->subsection &&
+            repo_remote_name_is_valid(e->subsection)) {
+            *out_name = xstrdup(e->subsection);
+            rc = 0;
+            break;
+        }
+    }
+
+done:
+    free(branch_remote);
+    config_file_free(&cf);
+    return rc;
+}
+
+int repo_read_branch_merge(const char *gitdir, const char *branch_ref,
+                           char **out_merge)
+{
+    *out_merge = NULL;
+    if (!branch_ref || strncmp(branch_ref, "refs/heads/", 11) != 0)
+        return 1;
+
+    ConfigFile cf;
+    if (config_read(gitdir, &cf) != 0)
+        return -1;
+
+    int rc = 1;
+    const char *shortname = branch_ref + 11;
+    for (size_t i = 0; i < cf.count; i++) {
+        ConfigEntry *e = &cf.entries[i];
+        if (strcasecmp(e->section, "branch") != 0 || !e->subsection ||
+            strcmp(e->subsection, shortname) != 0)
+            continue;
+        if (strcasecmp(e->key, "merge") != 0)
+            continue;
+        if (!ref_name_is_valid(e->value)) {
+            rc = -1;
+            break;
+        }
+        *out_merge = xstrdup(e->value);
+        rc = 0;
+        break;
+    }
+
+    config_file_free(&cf);
+    return rc;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Refspec mapping and writing                                               */
+/* ------------------------------------------------------------------------- */
+
+void ref_mappings_free(RefMapping *maps, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        free(maps[i].src);
+        free(maps[i].dst);
+        free(maps[i].symref);
+    }
+    free(maps);
+}
+
+int repo_refspec_selects(const RefspecSet *set, const char *refname,
+                         int include_tags)
+{
+    if (set->count == 0)
+        return 1;
+
+    char *dst = NULL;
+    int rc = refspec_set_map(set, refname, &dst, NULL);
+    free(dst);
+    if (rc == REFSPEC_MATCH)
+        return 1;
+    if (rc == REFSPEC_EXCLUDED || rc < 0)
+        return 0;
+    return include_tags && strncmp(refname, "refs/tags/", 10) == 0;
+}
+
+int repo_map_refspecs(const RefspecSet *set, const RemoteRefs *refs,
+                      int include_tags, RefMapping **out, size_t *out_count)
+{
+    *out = NULL;
+    *out_count = 0;
+
+    RefMapping *maps = NULL;
+    size_t count = 0;
+    size_t cap = 0;
+
+    for (size_t i = 0; i < refs->count; i++) {
+        const Ref *r = &refs->refs[i];
+        if (strcmp(r->name, "HEAD") == 0)
+            continue;
+
+        char *dst = NULL;
+        int force = 0;
+        int rc = refspec_set_map(set, r->name, &dst, &force);
+        if (rc < 0) {
+            free(dst);
+            ref_mappings_free(maps, count);
+            return -1;
+        }
+        if (rc == REFSPEC_EXCLUDED) {
+            free(dst);
+            continue;
+        }
+        if (rc == REFSPEC_NO_MATCH) {
+            if (!include_tags || strncmp(r->name, "refs/tags/", 10) != 0)
+                continue;
+            dst = xstrdup(r->name);
+            force = 0;
+        }
+
+        if (count == cap) {
+            cap = cap ? cap * 2 : 16;
+            maps = xrealloc(maps, cap * sizeof(RefMapping));
+        }
+        RefMapping *m = &maps[count++];
+        memset(m, 0, sizeof(*m));
+        m->src = xstrdup(r->name);
+        m->dst = dst;
+        m->symref = r->symref ? xstrdup(r->symref) : NULL;
+        memcpy(m->oid, r->oid, OID_RAW);
+        m->force = force;
+    }
+
+    *out = maps;
+    *out_count = count;
+    return 0;
+}
+
+int repo_write_mappings(const char *gitdir, const RefMapping *maps, size_t count,
+                        const RefWriteOptions *opts)
+{
+    int no_tags = opts && opts->no_tags;
+
+    /* Preflight every tag before writing anything. A clobber refusal must not
+     * leave the other refs half updated. */
+    for (size_t i = 0; i < count; i++) {
+        const RefMapping *m = &maps[i];
+        if (!m->dst || m->symref || strncmp(m->dst, "refs/tags/", 10) != 0)
+            continue;
+        if (no_tags)
+            continue;
+
+        int force = m->force || (opts && opts->force_tags);
+        unsigned char existing[OID_RAW];
+        int rc = repo_read_ref(gitdir, m->dst, existing);
+        if (rc < 0) {
+            warn_cgc("cannot read local tag '%s'", m->dst + 10);
+            return -1;
+        }
+        if (rc == 0 && memcmp(existing, m->oid, OID_RAW) != 0 && !force) {
+            warn_cgc("tag '%s' would be clobbered (use --force to overwrite)",
+                     m->dst + 10);
+            return -1;
+        }
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        const RefMapping *m = &maps[i];
+        if (!m->dst)
+            continue;
+        if (no_tags && strncmp(m->dst, "refs/tags/", 10) == 0)
+            continue;
+
+        int rc;
+        if (m->symref)
+            rc = write_symref_file(gitdir, m->dst, m->symref);
+        else
+            rc = write_ref_file(gitdir, m->dst, m->oid);
+        if (rc != 0)
+            return -1;
+    }
+    return 0;
+}
+
+int repo_write_mirror_refs(const char *gitdir, const RemoteRefs *refs)
+{
+    RefspecSet set;
+    refspec_set_init(&set);
+
+    RefMapping *maps = NULL;
+    size_t nmaps = 0;
+    int rc = -1;
+
+    if (refspec_set_add(&set, "+refs/*:refs/*") != 0)
+        goto done;
+    if (repo_map_refspecs(&set, refs, 0, &maps, &nmaps) != 0)
+        goto done;
+
+    RefWriteOptions opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.force_tags = 1;
+    rc = repo_write_mappings(gitdir, maps, nmaps, &opts);
+
+done:
+    ref_mappings_free(maps, nmaps);
+    refspec_set_free(&set);
+    return rc;
+}
+
+static int mapping_has_dst(const RefMapping *maps, size_t count,
+                           const char *dst)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (maps[i].dst && strcmp(maps[i].dst, dst) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int ref_matches_wildcard_dst(const RefspecSet *set, const char *name)
+{
+    for (size_t i = 0; i < set->count; i++) {
+        const Refspec *rs = &set->items[i];
+        if (rs->negative || !rs->dst || !strchr(rs->dst, '*'))
+            continue;
+        if (refspec_dst_matches(rs, name))
+            return 1;
+    }
+    return 0;
+}
+
+/* Return the literal directory prefix of a wildcard destination. Only
+ * patterns whose '*' is a whole path component are prunable. Returns 0 when a
+ * prefix was produced, 1 otherwise. */
+static int dst_wildcard_prefix(const char *dst, char **out_prefix)
+{
+    const char *star = strchr(dst, '*');
+    if (!star || star == dst || star[-1] != '/')
+        return 1;
+    *out_prefix = xstrndup(dst, (size_t)(star - dst));
+    return 0;
+}
+
+static int ref_file_is_symref(const char *path)
+{
+    Buf b;
+    buf_init(&b);
+    int rc = read_file(path, &b);
+    int sym = rc == 0 && b.len >= 5 && memcmp(b.data, "ref: ", 5) == 0;
+    buf_free(&b);
+    return sym;
+}
+
+static int prune_loose_under(const char *gitdir, const char *rel,
+                             const RefspecSet *set, const RefMapping *maps,
+                             size_t count, int remove_self)
+{
+    char *dir = path_join(gitdir, rel);
+    DIR *d = opendir(dir);
+    if (!d) {
+        int e = errno;
+        free(dir);
+        return e == ENOENT ? 0 : -1;
+    }
+
+    int rc = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+
+        Buf child;
+        buf_init(&child);
+        buf_append(&child, rel, strlen(rel));
+        if (child.len && child.data[child.len - 1] != '/')
+            buf_putc(&child, '/');
+        buf_append(&child, de->d_name, strlen(de->d_name));
+
+        char *full = path_join(gitdir, (char *)child.data);
+        struct stat st;
+        if (lstat(full, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                if (prune_loose_under(gitdir, (char *)child.data, set, maps,
+                                      count, 1) != 0)
+                    rc = -1;
+                rmdir(full);
+            } else if (S_ISREG(st.st_mode)) {
+                const char *name = (char *)child.data;
+                size_t n = strlen(name);
+                int is_lock =
+                    n >= 5 && strcmp(name + n - 5, ".lock") == 0;
+                if (!is_lock && !ref_file_is_symref(full) &&
+                    ref_matches_wildcard_dst(set, name) &&
+                    !mapping_has_dst(maps, count, name)) {
+                    if (unlink(full) != 0)
+                        rc = -1;
+                }
+            }
+        }
+        free(full);
+        buf_free(&child);
+    }
+
+    closedir(d);
+    /* Keep the namespace root itself (for example .git/refs) so bare-repo
+     * detection and later ref writes still find it. */
+    if (remove_self)
+        rmdir(dir);
+    free(dir);
+    return rc;
+}
+
+static int prune_packed_mappings(const char *gitdir, const RefspecSet *set,
+                                 const RefMapping *maps, size_t count)
+{
+    char *path = path_join(gitdir, "packed-refs");
+    Buf in;
+    buf_init(&in);
+    if (read_file(path, &in) != 0) {
+        int e = errno;
+        buf_free(&in);
+        free(path);
+        return e == ENOENT ? 0 : -1;
+    }
+
+    Buf out;
+    buf_init(&out);
+    int changed = 0;
+    int skip_peeled = 0;
+    size_t pos = 0;
+    while (pos < in.len) {
+        size_t start = pos;
+        while (pos < in.len && in.data[pos] != '\n')
+            pos++;
+        size_t len = pos - start;
+        int has_nl = pos < in.len;
+        if (has_nl)
+            pos++;
+
+        const char *line = (const char *)in.data + start;
+        if (len > 0 && line[0] == '^') {
+            if (skip_peeled) {
+                changed = 1;
+                skip_peeled = 0;
+                continue;
+            }
+        } else {
+            skip_peeled = 0;
+            if (len > OID_HEX + 1 && line[OID_HEX] == ' ') {
+                size_t name_len = len - (OID_HEX + 1);
+                if (name_len > 0 && line[len - 1] == '\r')
+                    name_len--;
+                char *name = xstrndup(line + OID_HEX + 1, name_len);
+                int drop = ref_matches_wildcard_dst(set, name) &&
+                           !mapping_has_dst(maps, count, name);
+                free(name);
+                if (drop) {
+                    changed = 1;
+                    skip_peeled = 1;
+                    continue;
+                }
+            }
+        }
+
+        buf_append(&out, line, len);
+        if (has_nl)
+            buf_putc(&out, '\n');
+    }
+
+    int rc = 0;
+    if (changed)
+        rc = write_file_atomic(path, out.data, out.len, 0644);
+    buf_free(&out);
+    buf_free(&in);
+    free(path);
+    return rc;
+}
+
+int repo_prune_mappings(const char *gitdir, const RefspecSet *set,
+                        const RefMapping *maps, size_t count)
+{
+    int rc = 0;
+    for (size_t i = 0; i < set->count; i++) {
+        const Refspec *rs = &set->items[i];
+        if (rs->negative || !rs->dst || !strchr(rs->dst, '*'))
+            continue;
+
+        char *prefix = NULL;
+        if (dst_wildcard_prefix(rs->dst, &prefix) != 0)
+            continue;
+        if (prune_loose_under(gitdir, prefix, set, maps, count, 0) != 0)
+            rc = -1;
+        free(prefix);
+    }
+
+    if (prune_packed_mappings(gitdir, set, maps, count) != 0)
+        rc = -1;
+    return rc;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Ref and config reading                                                    */
+/* ------------------------------------------------------------------------- */
 
 /* Look up a ref in .git/packed-refs. Returns 0 if found, 1 if absent, -1 on
  * a malformed entry. */
@@ -411,246 +1163,6 @@ int repo_write_ref(const char *gitdir, const char *name,
     return write_ref_file(gitdir, name, oid);
 }
 
-static int refs_has_name(const RemoteRefs *refs, const char *name)
-{
-    for (size_t i = 0; i < refs->count; i++)
-        if (strcmp(refs->refs[i].name, name) == 0)
-            return 1;
-    return 0;
-}
-
-int repo_write_remote_refs(const char *gitdir, const RemoteRefs *refs,
-                           const char *remote, const RefWriteOptions *opts)
-{
-    if (!repo_remote_name_is_valid(remote))
-        return -1;
-    int fetch_tags = !opts || !opts->no_tags;
-
-    /* Preflight every tag before writing anything. A clobber refusal must not
-     * leave the remote-tracking refs half updated. */
-    if (fetch_tags) {
-        for (size_t i = 0; i < refs->count; i++) {
-            const Ref *r = &refs->refs[i];
-            if (strncmp(r->name, "refs/tags/", 10) != 0 || r->symref)
-                continue;
-
-            unsigned char existing[OID_RAW];
-            int rr = repo_read_ref(gitdir, r->name, existing);
-            if (rr < 0) {
-                warn_cgc("cannot read local tag '%s'", r->name + 10);
-                return -1;
-            }
-            if (rr == 0 && memcmp(existing, r->oid, OID_RAW) != 0 &&
-                (!opts || !opts->force_tags)) {
-                warn_cgc("tag '%s' would be clobbered "
-                         "(use --force to overwrite)",
-                         r->name + 10);
-                return -1;
-            }
-        }
-    }
-
-    for (size_t i = 0; i < refs->count; i++) {
-        const Ref *r = &refs->refs[i];
-        int rc;
-        if (strncmp(r->name, "refs/heads/", 11) == 0) {
-            Buf remote_ref;
-            buf_init(&remote_ref);
-            buf_appendf(&remote_ref, "refs/remotes/%s/%s", remote,
-                        r->name + 11);
-            if (r->symref)
-                rc = write_symref_file(gitdir, (char *)remote_ref.data,
-                                       r->symref);
-            else
-                rc = write_ref_file(gitdir, (char *)remote_ref.data, r->oid);
-            buf_free(&remote_ref);
-            if (rc != 0)
-                return -1;
-        } else if (fetch_tags && strncmp(r->name, "refs/tags/", 10) == 0) {
-            if (r->symref)
-                rc = write_symref_file(gitdir, r->name, r->symref);
-            else
-                rc = write_ref_file(gitdir, r->name, r->oid);
-            if (rc != 0)
-                return -1;
-        }
-    }
-
-    if (refs->default_ref &&
-        strncmp(refs->default_ref, "refs/heads/", 11) == 0) {
-        Buf target;
-        buf_init(&target);
-        buf_appendf(&target, "refs/remotes/%s/%s", remote,
-                    refs->default_ref + 11);
-        Buf head;
-        buf_init(&head);
-        buf_appendf(&head, "refs/remotes/%s/HEAD", remote);
-        int rc = write_symref_file(gitdir, (char *)head.data,
-                                   (char *)target.data);
-        buf_free(&head);
-        buf_free(&target);
-        if (rc != 0)
-            return -1;
-    }
-    return 0;
-}
-
-/* True when rel (a refs/remotes/<remote>/... name) still has an advertised
- * branch behind it. HEAD and unrelated refs are always kept. */
-static int remote_ref_is_expected(const RemoteRefs *refs, const char *rel,
-                                  const char *remote)
-{
-    Buf prefix;
-    buf_init(&prefix);
-    buf_appendf(&prefix, "refs/remotes/%s/", remote);
-    if (strncmp(rel, (char *)prefix.data, prefix.len) != 0) {
-        buf_free(&prefix);
-        return 1;
-    }
-
-    const char *branch = rel + prefix.len;
-    buf_free(&prefix);
-    if (strcmp(branch, "HEAD") == 0)
-        return 1;
-
-    Buf full;
-    buf_init(&full);
-    buf_appendf(&full, "refs/heads/%s", branch);
-    int found = refs_has_name(refs, (char *)full.data);
-    buf_free(&full);
-    return found;
-}
-
-static int prune_loose_refs(const char *gitdir, const char *rel,
-                            const RemoteRefs *refs, const char *remote)
-{
-    char *dir = path_join(gitdir, rel);
-    DIR *d = opendir(dir);
-    if (!d) {
-        int e = errno;
-        free(dir);
-        return e == ENOENT ? 0 : -1;
-    }
-
-    int rc = 0;
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL) {
-        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
-            continue;
-
-        Buf child;
-        buf_init(&child);
-        buf_appendf(&child, "%s/%s", rel, de->d_name);
-
-        char *full = path_join(gitdir, (char *)child.data);
-        struct stat st;
-        if (lstat(full, &st) == 0) {
-            if (S_ISDIR(st.st_mode)) {
-                if (prune_loose_refs(gitdir, (char *)child.data, refs,
-                                     remote) != 0)
-                    rc = -1;
-                /* Remove the directory if pruning emptied it. */
-                rmdir(full);
-            } else if (S_ISREG(st.st_mode) &&
-                       !remote_ref_is_expected(refs, (char *)child.data,
-                                               remote)) {
-                if (unlink(full) != 0)
-                    rc = -1;
-            }
-        }
-        free(full);
-        buf_free(&child);
-    }
-
-    closedir(d);
-    rmdir(dir);
-    free(dir);
-    return rc;
-}
-
-/* Remove pruned refs from packed-refs, including any peeled line that follows
- * them. Returns 0 when the file is absent or nothing changed. */
-static int prune_packed_refs(const char *gitdir, const RemoteRefs *refs,
-                             const char *remote)
-{
-    char *path = path_join(gitdir, "packed-refs");
-    Buf in;
-    buf_init(&in);
-    if (read_file(path, &in) != 0) {
-        int e = errno;
-        buf_free(&in);
-        free(path);
-        return e == ENOENT ? 0 : -1;
-    }
-
-    Buf out;
-    buf_init(&out);
-    int changed = 0;
-    int skip_peeled = 0;
-    size_t pos = 0;
-    while (pos < in.len) {
-        size_t start = pos;
-        while (pos < in.len && in.data[pos] != '\n')
-            pos++;
-        size_t len = pos - start;
-        int has_nl = pos < in.len;
-        if (has_nl)
-            pos++;
-
-        const char *line = (const char *)in.data + start;
-        if (len > 0 && line[0] == '^') {
-            if (skip_peeled) {
-                changed = 1;
-                skip_peeled = 0;
-                continue;
-            }
-        } else {
-            skip_peeled = 0;
-            if (len > OID_HEX + 1 && line[OID_HEX] == ' ') {
-                size_t name_len = len - (OID_HEX + 1);
-                if (name_len > 0 && line[len - 1] == '\r')
-                    name_len--;
-                char *name = xstrndup(line + OID_HEX + 1, name_len);
-                int drop = !remote_ref_is_expected(refs, name, remote);
-                free(name);
-                if (drop) {
-                    changed = 1;
-                    skip_peeled = 1;
-                    continue;
-                }
-            }
-        }
-
-        buf_append(&out, line, len);
-        if (has_nl)
-            buf_putc(&out, '\n');
-    }
-
-    int rc = 0;
-    if (changed)
-        rc = write_file_atomic(path, out.data, out.len, 0644);
-    buf_free(&out);
-    buf_free(&in);
-    free(path);
-    return rc;
-}
-
-int repo_prune_remote_refs(const char *gitdir, const RemoteRefs *refs,
-                           const char *remote)
-{
-    if (!repo_remote_name_is_valid(remote))
-        return -1;
-
-    Buf rel;
-    buf_init(&rel);
-    buf_appendf(&rel, "refs/remotes/%s", remote);
-    int rc = prune_loose_refs(gitdir, (char *)rel.data, refs, remote);
-    buf_free(&rel);
-    if (prune_packed_refs(gitdir, refs, remote) != 0)
-        rc = -1;
-    return rc;
-}
-
 int repo_write_fetch_head(const char *gitdir, const RemoteRefs *refs,
                           const char *url, const char *merge_ref)
 {
@@ -664,21 +1176,22 @@ int repo_write_fetch_head(const char *gitdir, const RemoteRefs *refs,
         char hex[OID_HEX + 1];
         oid_hex(r->oid, hex);
 
-        const char *kind = NULL;
-        const char *name = NULL;
-        if (strncmp(r->name, "refs/heads/", 11) == 0) {
-            kind = "branch";
-            name = r->name + 11;
-        } else if (strncmp(r->name, "refs/tags/", 10) == 0) {
-            kind = "tag";
-            name = r->name + 10;
-        } else {
+        Buf desc;
+        buf_init(&desc);
+        if (strncmp(r->name, "refs/heads/", 11) == 0)
+            buf_appendf(&desc, "branch '%s'", r->name + 11);
+        else if (strncmp(r->name, "refs/tags/", 10) == 0)
+            buf_appendf(&desc, "tag '%s'", r->name + 10);
+        else if (strncmp(r->name, "refs/", 5) == 0)
+            buf_appendf(&desc, "'%s'", r->name);
+        else
             continue;
-        }
 
         int mergeable = merge_ref && strcmp(r->name, merge_ref) == 0;
-        buf_appendf(&b, "%s\t%s\t%s '%s' of %s\n", hex,
-                    mergeable ? "" : "not-for-merge", kind, name, url);
+        buf_appendf(&b, "%s\t%s\t%s of %s\n", hex,
+                    mergeable ? "" : "not-for-merge",
+                    (char *)desc.data, url);
+        buf_free(&desc);
     }
 
     char *path = path_join(gitdir, "FETCH_HEAD");
@@ -702,88 +1215,6 @@ int repo_write_orig_head(const char *gitdir,
     int rc = write_file_atomic(path, line, OID_HEX + 1, 0644);
     free(path);
     return rc;
-}
-
-int repo_read_remote(const char *gitdir, char **out_name, char **out_url)
-{
-    *out_name = NULL;
-    *out_url = NULL;
-    char *path = path_join(gitdir, "config");
-    Buf b;
-    buf_init(&b);
-    int rc = read_file(path, &b);
-    free(path);
-    if (rc != 0) {
-        buf_free(&b);
-        return 1;
-    }
-
-    int in_remote = 0;
-    int found = 1;
-    char *current = NULL;
-    char *save = NULL;
-    for (char *line = strtok_r((char *)b.data, "\n", &save); line;
-         line = strtok_r(NULL, "\n", &save)) {
-        size_t len = strlen(line);
-        while (len > 0 && line[len - 1] == '\r')
-            line[--len] = '\0';
-
-        char *s = trim_ws(line);
-        if (!*s || *s == '#' || *s == ';')
-            continue;
-        if (*s == '[') {
-            in_remote = 0;
-            free(current);
-            current = NULL;
-
-            char *p = s + 1;
-            while (*p == ' ' || *p == '\t')
-                p++;
-            if (strncmp(p, "remote", 6) == 0) {
-                p += 6;
-                while (*p == ' ' || *p == '\t')
-                    p++;
-                if (*p == '"') {
-                    p++;
-                    char *end = strchr(p, '"');
-                    if (end && end[1] == ']' && end[2] == '\0') {
-                        char *name = xstrndup(p, (size_t)(end - p));
-                        if (repo_remote_name_is_valid(name)) {
-                            current = name;
-                            in_remote = 1;
-                        } else {
-                            free(name);
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-        if (!in_remote)
-            continue;
-
-        char *eq = strchr(s, '=');
-        if (!eq)
-            continue;
-        *eq = '\0';
-        char *key = trim_ws(s);
-        char *value = trim_ws(eq + 1);
-        if (strcmp(key, "url") == 0) {
-            if (!text_is_safe(value) || !*value) {
-                found = -1;
-                break;
-            }
-            *out_name = current;
-            current = NULL;
-            *out_url = xstrdup(value);
-            found = 0;
-            break;
-        }
-    }
-
-    free(current);
-    buf_free(&b);
-    return found;
 }
 
 int repo_head(const char *gitdir, char **out_ref,

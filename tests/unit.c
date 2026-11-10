@@ -1,4 +1,5 @@
 #include "pktline.h"
+#include "refspec.h"
 #include "url.h"
 #include "util.h"
 
@@ -273,6 +274,97 @@ static void test_ref_names(void)
         CHECK(!ref_name_is_valid(invalid[i]));
 }
 
+static void test_refspecs(void)
+{
+    RefspecSet set;
+    char *dst = NULL;
+    int force = 0;
+
+    refspec_set_init(&set);
+    CHECK(refspec_set_add(&set, "+refs/heads/*:refs/remotes/origin/*") == 0);
+    CHECK(refspec_set_map(&set, "refs/heads/main", &dst, &force) ==
+          REFSPEC_MATCH);
+    CHECK_STR(dst, "refs/remotes/origin/main");
+    CHECK(force == 1);
+    free(dst);
+    dst = NULL;
+
+    CHECK(refspec_set_map(&set, "refs/tags/v1", &dst, &force) ==
+          REFSPEC_NO_MATCH);
+    CHECK(dst == NULL);
+    CHECK(force == 0);
+    refspec_set_free(&set);
+
+    /* A fetch-only refspec leaves the destination NULL. */
+    refspec_set_init(&set);
+    CHECK(refspec_set_add(&set, "refs/heads/main") == 0);
+    CHECK(refspec_set_map(&set, "refs/heads/main", &dst, &force) ==
+          REFSPEC_MATCH);
+    CHECK(dst == NULL);
+    CHECK(force == 0);
+    refspec_set_free(&set);
+
+    /* Negative refspecs exclude matching refs before positive ones apply. */
+    refspec_set_init(&set);
+    CHECK(refspec_set_add(&set, "+refs/heads/*:refs/remotes/origin/*") == 0);
+    CHECK(refspec_set_add(&set, "^refs/heads/secret") == 0);
+    CHECK(refspec_set_map(&set, "refs/heads/secret", &dst, &force) ==
+          REFSPEC_EXCLUDED);
+    CHECK(dst == NULL);
+    CHECK(refspec_set_map(&set, "refs/heads/main", &dst, &force) ==
+          REFSPEC_MATCH);
+    CHECK_STR(dst, "refs/remotes/origin/main");
+    free(dst);
+    dst = NULL;
+    refspec_set_free(&set);
+
+    /* Mirror-style refspec copies every ref verbatim and forces updates. */
+    refspec_set_init(&set);
+    CHECK(refspec_set_add(&set, "+refs/*:refs/*") == 0);
+    CHECK(refspec_set_map(&set, "refs/heads/main", &dst, &force) ==
+          REFSPEC_MATCH);
+    CHECK_STR(dst, "refs/heads/main");
+    CHECK(force == 1);
+    free(dst);
+    dst = NULL;
+    CHECK(refspec_set_map(&set, "refs/tags/v1", &dst, &force) ==
+          REFSPEC_MATCH);
+    CHECK_STR(dst, "refs/tags/v1");
+    free(dst);
+    dst = NULL;
+    refspec_set_free(&set);
+
+    /* Destination matching is used to decide what pruning may remove. */
+    refspec_set_init(&set);
+    CHECK(refspec_set_add(&set, "+refs/heads/*:refs/remotes/origin/*") == 0);
+    CHECK(refspec_dst_matches(&set.items[0], "refs/remotes/origin/main"));
+    CHECK(!refspec_dst_matches(&set.items[0],
+                               "refs/remotes/upstream/main"));
+    CHECK(!refspec_dst_matches(&set.items[0], "refs/tags/v1"));
+    refspec_set_free(&set);
+
+    static const char *invalid[] = {
+        "",
+        "+",
+        "^",
+        "refs/heads/*:refs/remotes/origin/main",
+        "refs/heads/main:refs/remotes/origin/*",
+        "refs/heads/a..b:refs/heads/a..b",
+        "refs/heads/x:",
+        ":refs/heads/x",
+        "heads/main",
+        "refs/heads/a b:refs/heads/a b",
+        "^refs/heads/x:refs/heads/x",
+        "refs/heads/x:refs/heads/y:refs/heads/z",
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        refspec_set_init(&set);
+        CHECK(refspec_set_add(&set, invalid[i]) != 0);
+        CHECK(set.count == 0);
+        refspec_set_free(&set);
+    }
+}
+
 int main(void)
 {
     test_url_parse();
@@ -283,6 +375,7 @@ int main(void)
     test_paths();
     test_safe_paths();
     test_ref_names();
+    test_refspecs();
 
     if (failures) {
         fprintf(stderr, "%d test(s) failed\n", failures);
