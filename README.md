@@ -15,6 +15,11 @@ loose objects and refs, checks out the working tree, and writes a Git index.
 It can also `fetch`, `pull`, and `update` an existing clone, negotiating with
 `have` lines and fast-forwarding the current branch.
 
+Clones can be bare (`--bare`), skip the working-tree checkout (`--no-checkout`),
+use a custom remote name (`--origin <name>`), or skip tags (`--no-tags`). Fetch
+and pull follow the first remote configured in `.git/config`, so non-`origin`
+remote names update `refs/remotes/<name>/*`.
+
 Fetch and pull update remote-tracking refs and tags safely: a local tag that
 differs from the remote is refused unless `--force` is given, `--no-tags` skips
 tags, and `--prune` removes remote-tracking refs for deleted branches (including

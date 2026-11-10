@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -98,6 +99,61 @@ static int read_gitfile(const char *dotgit, const char *dir, char **out)
     return 0;
 }
 
+/* Detect a bare repository: a gitdir with HEAD, objects, refs, and a config
+ * that sets bare = true. */
+static int is_bare_gitdir(const char *dir)
+{
+    char *head = path_join(dir, "HEAD");
+    char *objects = path_join(dir, "objects");
+    char *refs = path_join(dir, "refs");
+    char *config = path_join(dir, "config");
+    struct stat st;
+    int ok = stat(head, &st) == 0 && S_ISREG(st.st_mode) &&
+             stat(objects, &st) == 0 && S_ISDIR(st.st_mode) &&
+             stat(refs, &st) == 0 && S_ISDIR(st.st_mode) &&
+             stat(config, &st) == 0 && S_ISREG(st.st_mode);
+    free(head);
+    free(objects);
+    free(refs);
+
+    if (!ok) {
+        free(config);
+        return 0;
+    }
+
+    Buf b;
+    buf_init(&b);
+    if (read_file(config, &b) != 0) {
+        buf_free(&b);
+        free(config);
+        return 0;
+    }
+    free(config);
+
+    int bare = 0;
+    char *save = NULL;
+    for (char *line = strtok_r((char *)b.data, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        while (*line == ' ' || *line == '\t')
+            line++;
+        if (strncasecmp(line, "bare", 4) != 0)
+            continue;
+        char *p = line + 4;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p != '=')
+            continue;
+        p++;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (strncasecmp(p, "true", 4) == 0 &&
+            (p[4] == '\0' || p[4] == '\r' || p[4] == ' ' || p[4] == '\t'))
+            bare = 1;
+    }
+    buf_free(&b);
+    return bare;
+}
+
 /* Find the repository containing start, walking up parent directories.
  * Returns 0 when found, 1 when there is no repository, -1 on error. */
 static int find_repo(const char *start, char **out_gitdir, char **out_worktree)
@@ -108,6 +164,13 @@ static int find_repo(const char *start, char **out_gitdir, char **out_worktree)
 
     int result = 1;
     for (;;) {
+        if (is_bare_gitdir(cur)) {
+            *out_gitdir = xstrdup(cur);
+            *out_worktree = NULL;
+            result = 0;
+            break;
+        }
+
         char *dotgit = path_join(cur, ".git");
         struct stat st;
         if (stat(dotgit, &st) == 0) {
@@ -352,6 +415,7 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
 
     int rc = -1;
     char *url = NULL;
+    char *remote = NULL;
     char *head_ref = NULL;
     char *target_ref = NULL;
     unsigned char (*haves)[OID_RAW] = NULL;
@@ -367,8 +431,13 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
         goto done;
     }
 
-    if (repo_read_origin_url(gitdir, &url) != 0 || !url) {
-        warn_cgc("no origin remote configured");
+    if (pull && !worktree) {
+        warn_cgc("cannot pull in a bare repository");
+        goto done;
+    }
+
+    if (repo_read_remote(gitdir, &remote, &url) != 0 || !url) {
+        warn_cgc("no remote configured");
         goto done;
     }
 
@@ -411,7 +480,7 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
             goto done;
         }
         if (opts && opts->prune && !branch_opt &&
-            repo_prune_remote_refs(gitdir, &refs) != 0)
+            repo_prune_remote_refs(gitdir, &refs, remote) != 0)
             warn_cgc("could not prune stale remote-tracking refs");
         if (!cgc_quiet)
             fprintf(stderr, "From %s\n", url);
@@ -458,20 +527,28 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
 
     report_fetch(gitdir, active, url);
 
-    RefWriteOptions ref_opts;
-    memset(&ref_opts, 0, sizeof(ref_opts));
-    ref_opts.force_tags = opts && opts->force_tags;
-    ref_opts.no_tags = no_tags;
-    if (repo_write_remote_refs(gitdir, active, &ref_opts) != 0) {
-        warn_cgc("cannot update remote refs");
-        goto done;
-    }
     if (repo_write_fetch_head(gitdir, active, url,
                               pull ? target_ref : NULL) != 0)
         warn_cgc("cannot write FETCH_HEAD");
 
+    /* A bare repository has no configured fetch refspec by default. Match
+     * git's behavior: fetch records FETCH_HEAD and leaves refs alone. */
+    if (!worktree) {
+        rc = 0;
+        goto done;
+    }
+
+    RefWriteOptions ref_opts;
+    memset(&ref_opts, 0, sizeof(ref_opts));
+    ref_opts.force_tags = opts && opts->force_tags;
+    ref_opts.no_tags = no_tags;
+    if (repo_write_remote_refs(gitdir, active, remote, &ref_opts) != 0) {
+        warn_cgc("cannot update remote refs");
+        goto done;
+    }
+
     if (opts && opts->prune && !branch_opt) {
-        if (repo_prune_remote_refs(gitdir, active) != 0)
+        if (repo_prune_remote_refs(gitdir, active, remote) != 0)
             warn_cgc("could not prune stale remote-tracking refs");
     }
 
@@ -622,6 +699,7 @@ done:
     if (have_filter)
         free(filtered.refs);
     free(url);
+    free(remote);
     free(head_ref);
     free(target_ref);
     free(haves);

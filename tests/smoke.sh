@@ -133,6 +133,64 @@ grep -q "You appear to have cloned an empty repository" <<<"$empty_out"
 test -f "$WORK/empty/.git/HEAD"
 grep -q "refs/heads/main" "$WORK/empty/.git/HEAD"
 
+# --bare creates a bare repository: no worktree, no .git directory, and refs
+# stored directly under the destination.
+"$ROOT/cgc" -q --bare "$URL" "$WORK/bare.git"
+test -d "$WORK/bare.git/objects"
+test ! -e "$WORK/bare.git/.git"
+test ! -e "$WORK/bare.git/README.md"
+test "$(git -C "$WORK/bare.git" rev-parse --is-bare-repository)" = true
+test "$(git -C "$WORK/bare.git" rev-parse refs/heads/main)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/main)"
+test "$(git -C "$WORK/bare.git" rev-parse refs/tags/v1)" = \
+     "$(git -C "$WORK/src" rev-parse refs/tags/v1)"
+git -C "$WORK/bare.git" fsck --full
+BARE_HEAD=$(git -C "$WORK/bare.git" rev-parse refs/heads/main)
+
+# --no-checkout writes refs and HEAD but no index or working-tree files.
+"$ROOT/cgc" -q --no-checkout "$URL" "$WORK/nocheckout"
+test ! -e "$WORK/nocheckout/.git/index"
+test ! -e "$WORK/nocheckout/README.md"
+test "$(git -C "$WORK/nocheckout" rev-parse HEAD)" = \
+     "$(git -C "$WORK/src" rev-parse HEAD)"
+test "$(git -C "$WORK/nocheckout" rev-parse refs/remotes/origin/main)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/main)"
+
+# --origin names the remote and its remote-tracking refs.
+"$ROOT/cgc" -q --origin upstream "$URL" "$WORK/renamed"
+grep -q '\[remote "upstream"\]' "$WORK/renamed/.git/config"
+test "$(git -C "$WORK/renamed" rev-parse refs/remotes/upstream/main)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/main)"
+test "$(git -C "$WORK/renamed" rev-parse refs/remotes/upstream/dev)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/dev)"
+test ! -e "$WORK/renamed/.git/refs/remotes/origin"
+
+# --no-tags leaves tags out of a clone.
+"$ROOT/cgc" -q --no-tags "$URL" "$WORK/notags"
+test "$(git -C "$WORK/notags" rev-parse refs/heads/main)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/main)"
+test -z "$(git -C "$WORK/notags" for-each-ref --format='%(refname)' refs/tags)"
+
+# A new upstream commit exercises fetch with a non-origin remote and a bare
+# repository. Bare fetch records FETCH_HEAD but leaves refs untouched.
+printf 'renamed remote\n' > "$WORK/src/renamed.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "renamed remote"
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+RENAMED_HEAD=$(git -C "$WORK/src" rev-parse HEAD)
+(cd "$WORK/renamed" && "$ROOT/cgc" fetch -q)
+test "$(git -C "$WORK/renamed" rev-parse refs/remotes/upstream/main)" = \
+     "$RENAMED_HEAD"
+test ! -e "$WORK/renamed/.git/refs/remotes/origin"
+
+(cd "$WORK/bare.git" && "$ROOT/cgc" fetch -q)
+test "$(git -C "$WORK/bare.git" rev-parse refs/heads/main)" = "$BARE_HEAD"
+grep -q "^$RENAMED_HEAD" "$WORK/bare.git/FETCH_HEAD"
+if (cd "$WORK/bare.git" && "$ROOT/cgc" pull -q >/dev/null 2>&1); then
+    echo "smoke: pull was accepted in a bare repository" >&2
+    exit 1
+fi
+
 # Invalid --depth values are rejected before any network access.
 for depth in 0 -1 abc 12x 999999999999999999999; do
     if "$ROOT/cgc" --depth "$depth" gh:owner/repo "$WORK/bad-depth" \

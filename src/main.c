@@ -44,6 +44,10 @@ static void usage(FILE *out)
             "  --single-branch clone only the history of one branch\n"
             "  --no-single-branch\n"
             "                 fetch all branches (default unless --depth is given)\n"
+            "  --bare          create a bare repository (no working tree or index)\n"
+            "  --no-checkout   do not check out files into the working tree\n"
+            "  --no-tags       do not fetch or update tags\n"
+            "  --origin <name> use <name> for the remote (default origin)\n"
             "  -q, --quiet     suppress progress messages\n"
             "  -h, --help      show this help\n"
             "  -V, --version   show version\n"
@@ -293,6 +297,10 @@ int main(int argc, char **argv)
     int depth = 0;
     int single_branch = 0;
     int no_single_branch = 0;
+    int bare = 0;
+    int no_checkout = 0;
+    int no_tags = 0;
+    const char *remote_name = "origin";
     const char *positional[3];
     int npos = 0;
 
@@ -335,6 +343,16 @@ int main(int argc, char **argv)
             single_branch = 1;
         } else if (strcmp(a, "--no-single-branch") == 0) {
             no_single_branch = 1;
+        } else if (strcmp(a, "--bare") == 0) {
+            bare = 1;
+        } else if (strcmp(a, "--no-checkout") == 0) {
+            no_checkout = 1;
+        } else if (strcmp(a, "--no-tags") == 0) {
+            no_tags = 1;
+        } else if (strcmp(a, "--origin") == 0) {
+            if (i + 1 >= argc)
+                die("--origin requires an argument");
+            remote_name = argv[++i];
         } else if (strcmp(a, "--") == 0) {
             for (i++; i < argc; i++) {
                 if (npos >= 2)
@@ -354,6 +372,8 @@ int main(int argc, char **argv)
         usage(stderr);
         return 2;
     }
+    if (!repo_remote_name_is_valid(remote_name))
+        die("invalid remote name '%s'", remote_name);
 
     cgc_quiet = quiet;
 
@@ -381,6 +401,19 @@ int main(int argc, char **argv)
     }
 
     const char *dest = npos >= 2 ? positional[1] : derived_name;
+    char *bare_name = NULL;
+    if (bare && npos < 2) {
+        size_t n = strlen(derived_name);
+        if (n >= 4 && strcmp(derived_name + n - 4, ".git") == 0) {
+            bare_name = xstrdup(derived_name);
+        } else {
+            Buf b;
+            buf_init(&b);
+            buf_appendf(&b, "%s.git", derived_name);
+            bare_name = (char *)b.data;
+        }
+        dest = bare_name;
+    }
 
     int exists = 0;
     int empty = is_dir_empty(dest, &exists);
@@ -398,7 +431,7 @@ int main(int argc, char **argv)
     if (!quiet)
         fprintf(stderr, "Cloning into '%s'...\n", dest);
 
-    char *gitdir = path_join(dest, ".git");
+    char *gitdir = bare ? xstrdup(dest) : path_join(dest, ".git");
     if (repo_init(gitdir) != 0)
         die("cannot initialise repository in '%s'", gitdir);
 
@@ -444,6 +477,38 @@ int main(int argc, char **argv)
         }
     }
 
+    /* --no-tags: drop advertised tags before the fetch request, but keep a tag
+     * explicitly selected with --branch. */
+    if (no_tags && !refs.empty) {
+        char keep_tag[512];
+        int has_keep = 0;
+        if (branch) {
+            if (strncmp(branch, "refs/tags/", 10) == 0) {
+                snprintf(keep_tag, sizeof(keep_tag), "%s", branch);
+                has_keep = 1;
+            } else {
+                snprintf(keep_tag, sizeof(keep_tag), "refs/tags/%s", branch);
+                has_keep = 1;
+            }
+        }
+
+        size_t w = 0;
+        for (size_t i = 0; i < refs.count; i++) {
+            Ref *r = &refs.refs[i];
+            int is_tag = strncmp(r->name, "refs/tags/", 10) == 0;
+            int keep = !is_tag || (has_keep && strcmp(r->name, keep_tag) == 0);
+            if (keep) {
+                if (w != i)
+                    refs.refs[w] = refs.refs[i];
+                w++;
+            } else {
+                free(refs.refs[i].name);
+                free(refs.refs[i].symref);
+            }
+        }
+        refs.count = w;
+    }
+
     /* Resolve the requested branch/tag (or the remote's default). */
     const char *head_ref = refs.default_ref ? refs.default_ref : "refs/heads/main";
     unsigned char target_oid[OID_RAW];
@@ -487,7 +552,8 @@ int main(int argc, char **argv)
             }
         }
         if (!chosen)
-            die("Remote branch or tag '%s' not found in upstream origin", branch);
+            die("Remote branch or tag '%s' not found in upstream %s", branch,
+                remote_name);
 
         if (chosen->has_peeled)
             memcpy(target_oid, chosen->peeled, OID_RAW);
@@ -508,7 +574,8 @@ int main(int argc, char **argv)
         memcpy(target_oid, refs.default_oid, OID_RAW);
     }
 
-    if (repo_write_config(gitdir, url, config_ref) != 0)
+    if (repo_write_config(gitdir, url, bare ? NULL : config_ref, remote_name,
+                          bare) != 0)
         die("cannot write repository configuration");
     if (detached) {
         if (repo_set_head_detached(gitdir, target_oid) != 0)
@@ -523,12 +590,14 @@ int main(int argc, char **argv)
             remote_refs_free(&refs);
             die("fetch failed");
         }
-        if (repo_write_refs(gitdir, &refs) != 0) {
+        int write_rc = bare ? repo_write_bare_refs(gitdir, &refs)
+                            : repo_write_refs(gitdir, &refs, remote_name);
+        if (write_rc != 0) {
             remote_refs_free(&refs);
             die("cannot write refs");
         }
 
-        if (has_target) {
+        if (has_target && !bare && !no_checkout) {
             if (checkout_commit(gitdir, dest, target_oid) != 0) {
                 remote_refs_free(&refs);
                 die("checkout failed");
@@ -543,6 +612,7 @@ int main(int argc, char **argv)
     free(gitdir);
     free(url);
     free(derived_name);
+    free(bare_name);
 
     cleanup_enabled = 0;
     return 0;

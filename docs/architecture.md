@@ -20,10 +20,13 @@
    binary-searched offsets, hashes each object and writes it as a loose,
    read-only object.
 7. **Refs and config** (`repo.c`) — writes local branches, tags,
-   `refs/remotes/origin/*`, `origin/HEAD`, `HEAD`, and the `origin` remote.
+   `refs/remotes/<remote>/*`, `<remote>/HEAD`, `HEAD`, and the named remote
+   (default `origin`). A bare clone writes refs and objects directly into the
+   destination and omits the fetch refspec and branch section.
 8. **Checkout** (`checkout.c`) — walks the `HEAD` tree, writes files, symlinks,
    executable bits and submodule mount points, then writes a DIRC version 2
-   index so Git sees a clean working tree.
+   index so Git sees a clean working tree. `--bare` and `--no-checkout` skip
+   this step.
 
 ## Incremental fetch and pull
 
@@ -31,18 +34,20 @@
 different flow (`update.c`):
 
 1. **Locate the repository** — walk up from the given directory (default `.`)
-   until a `.git` directory or gitfile is found, and read the `origin` URL from
-   `.git/config`.
+   until a `.git` directory, gitfile, or bare repository is found, and read the
+   first remote name and URL from the config.
 2. **Negotiate** — list refs as before, then send `command=fetch` with a `want`
    for each remote ref and `have` lines for every local ref, branch and tag.
    The server sends only objects reachable from the wants but not the haves.
 3. **Unpack** — the same pack reader writes the new objects. An empty pack
    means the clone was already up to date.
-4. **Fetch bookkeeping** — rewrite `refs/remotes/origin/*` and tags. Existing
+4. **Fetch bookkeeping** — rewrite `refs/remotes/<remote>/*` and tags. Existing
    tags are preflighted and refused if the remote moved them, unless `--force`.
    `--no-tags` skips tags, and `--prune` removes stale loose and packed
-   remote-tracking refs. Local branches and the worktree are untouched.
-   `FETCH_HEAD` is written atomically.
+   remote-tracking refs for the configured remote. Local branches and the
+   worktree are untouched. `FETCH_HEAD` is written atomically. In a bare
+   repository only `FETCH_HEAD` is written, matching Git's default behavior
+   without a fetch refspec.
 5. **Fast-forward check** (`pull` only) — walk the new commit's parents to
    confirm the local branch tip is an ancestor. Merges and rebases are not
    supported.

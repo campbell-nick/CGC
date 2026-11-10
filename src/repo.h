@@ -6,9 +6,13 @@
 /* Create the basic .git layout. */
 int repo_init(const char *gitdir);
 
-/* Write .git/config with the origin remote and default branch. */
+/* Remote names are used in config sections and refs/remotes/<name>/. */
+int repo_remote_name_is_valid(const char *name);
+
+/* Write .git/config with the named remote and default branch. A bare
+ * repository gets bare = true and no fetch refspec or branch section. */
 int repo_write_config(const char *gitdir, const char *url,
-                      const char *default_ref);
+                      const char *default_ref, const char *remote, int bare);
 
 int repo_set_head(const char *gitdir, const char *default_ref);
 
@@ -23,18 +27,23 @@ typedef struct {
     int no_tags;
 } RefWriteOptions;
 
-/* Write local branches, tags and remote-tracking refs. */
-int repo_write_refs(const char *gitdir, const RemoteRefs *refs);
+/* Write local branches, tags and remote-tracking refs for remote. */
+int repo_write_refs(const char *gitdir, const RemoteRefs *refs,
+                    const char *remote);
 
-/* Write only remote-tracking refs under refs/remotes/origin and tags, as a
+/* Write local branches and tags only, as a bare clone does. */
+int repo_write_bare_refs(const char *gitdir, const RemoteRefs *refs);
+
+/* Write only remote-tracking refs under refs/remotes/<remote> and tags, as a
  * fetch does. Local branches are left untouched. Existing tags are never
  * clobbered unless opts->force_tags is set; opts->no_tags skips tags. */
 int repo_write_remote_refs(const char *gitdir, const RemoteRefs *refs,
-                           const RefWriteOptions *opts);
+                           const char *remote, const RefWriteOptions *opts);
 
-/* Delete loose and packed refs under refs/remotes/origin that are not
+/* Delete loose and packed refs under refs/remotes/<remote> that are not
  * advertised by refs. Returns 0 on success. */
-int repo_prune_remote_refs(const char *gitdir, const RemoteRefs *refs);
+int repo_prune_remote_refs(const char *gitdir, const RemoteRefs *refs,
+                           const char *remote);
 
 /* Write .git/FETCH_HEAD for the refs that were fetched. merge_ref, when not
  * NULL, names the branch that a following pull would merge. */
@@ -45,9 +54,9 @@ int repo_write_fetch_head(const char *gitdir, const RemoteRefs *refs,
 int repo_write_orig_head(const char *gitdir,
                          const unsigned char oid[OID_RAW]);
 
-/* Read the origin URL from .git/config. Returns 0 on success, 1 if no origin
- * URL is configured, -1 on I/O or parse errors. */
-int repo_read_origin_url(const char *gitdir, char **out_url);
+/* Read the first configured remote from .git/config. Returns 0 on success,
+ * 1 when no remote is configured, -1 on I/O or parse errors. */
+int repo_read_remote(const char *gitdir, char **out_name, char **out_url);
 
 /* Resolve a ref (following symrefs and packed-refs). Returns 0 if found,
  * 1 if missing, -1 on a malformed ref. */

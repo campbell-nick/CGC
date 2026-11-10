@@ -22,6 +22,16 @@ All notable changes to this project are documented here. The format follows
   existing local tag that points at a different object unless `--force` is
   given. All tags are preflighted before any ref is written.
 - `--no-tags` and `--tags` to skip or restore tag fetching.
+- Clone `--bare` to create a repository without a working tree or index, and
+  `--no-checkout` to write refs and configuration without checking out files.
+- Clone `--origin <name>` to name the remote; config sections, branch upstream
+  settings, and `refs/remotes/<name>/*` all use the chosen name.
+- Clone `--no-tags` to skip tags; a tag selected explicitly with `--branch` is
+  still checked out.
+- Fetch and pull use the first remote configured in `.git/config` rather than a
+  hard-coded `origin`, and prune/update `refs/remotes/<name>/*` accordingly.
+- Bare-repository detection for `fetch`; a bare fetch writes `FETCH_HEAD` and
+  leaves refs unchanged, and `pull` is refused.
 - `--prune` to delete remote-tracking refs for branches deleted upstream,
   including entries in `packed-refs`.
 - `.git/FETCH_HEAD` for fetch and pull, and `.git/ORIG_HEAD` before a pull
@@ -29,6 +39,8 @@ All notable changes to this project are documented here. The format follows
 - End-to-end coverage for fetch, pull, the `update` alias, dirty-worktree
   refusal, and non-fast-forward refusal, plus tag safety, `--prune`, index
   flags, and staged-change handling.
+- End-to-end coverage for `--bare`, `--no-checkout`, `--origin`, clone
+  `--no-tags`, non-`origin` fetches, and bare fetch behavior.
 
 ### Changed
 
