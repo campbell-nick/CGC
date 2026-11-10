@@ -1,6 +1,6 @@
 .TH CGC 1 "2026-11-10" "cgc 0.2.0" "User Commands"
 .SH NAME
-cgc \- clone, fetch, pull, and update a Git repository over smart HTTP
+cgc \- clone, fetch, pull, and update Git repositories
 .SH SYNOPSIS
 .B cgc
 [\fIOPTIONS\fR] \fIREPOSITORY\fR [\fIDIRECTORY\fR]
@@ -17,10 +17,12 @@ cgc \- clone, fetch, pull, and update a Git repository over smart HTTP
 .B cgc
 is a self-contained implementation of
 .BR git-clone (1)
-that speaks the Git smart HTTP protocol (version 2) directly.
-It downloads the packfile, verifies and unpacks it, resolves deltas, writes
-loose objects, refs and configuration, and checks out the working tree with a
-Git-compatible index.
+that speaks the Git smart HTTP protocol (version 2) directly, and can also read
+a local repository without invoking
+.BR git (1).
+It downloads or copies objects, verifies and unpacks packfiles, resolves deltas,
+writes loose objects, refs and configuration, and checks out the working tree
+with a Git-compatible index.
 .PP
 The
 .BR fetch ,
@@ -48,6 +50,19 @@ directories are searched for the repository.
 An explicit URL. Plain
 .B http://
 is accepted for local testing.
+.TP
+.B \fI/path/to/repo\fR
+A local repository: a working tree with a
+.B .git
+directory or
+.B .git
+file (linked worktree), or a bare repository. Relative paths, paths starting
+with
+.BR ~ ,
+and
+.B file://
+URLs are also accepted. Local repositories are read directly; objects and
+packed objects are copied into the destination.
 .TP
 .B gh:\fIowner\fR/\fIrepo\fR
 Expands to
@@ -94,6 +109,13 @@ records what was fetched. In a bare repository,
 writes only
 .B FETCH_HEAD
 and leaves refs unchanged, matching Git's default without a fetch refspec.
+When the remote is a local path or
+.B file://
+URL, objects are copied directly from the source repository, including
+unpacking source packfiles. Local transfers copy all objects rather than
+negotiating
+.B have
+lines.
 .TP
 .B pull
 Fetch, then fast-forward the current branch and update the working tree and
@@ -208,7 +230,7 @@ commits. Writes
 .B .git/shallow
 with the shallow boundary. Implies
 .BR \-\-single\-branch .
-Clone only.
+Rejected for local repositories. Clone only.
 .TP
 .B \-\-single\-branch
 Clone only the history of one branch. Clone only.
@@ -266,6 +288,8 @@ cgc \-\-bare gh:owner/repo
 cgc \-\-no\-checkout gh:owner/repo
 cgc \-\-origin upstream gh:owner/repo
 cgc \-\-no\-tags gh:owner/repo
+cgc /srv/git/project.git
+cgc file:///srv/git/project.git project\-copy
 cd repo && cgc fetch
 cd repo && cgc pull
 cd repo && cgc fetch \-\-prune
@@ -361,10 +385,14 @@ These checks are not a sandbox: as with
 .BR git-clone (1),
 do not run code from an untrusted repository without reviewing it.
 .SH LIMITATIONS
-No SSH, \fBgit://\fR, or local-path transports; protocol v2 and SHA-1 only;
-the whole pack and all inflated objects are held in memory, and a single object
-larger than 2 GiB is rejected; pull is fast-forward-only (no merge, rebase, or
-conflict resolution); pull cannot fetch into a shallow clone, cannot run in a
+No SSH or \fBgit://\fR transport; protocol v2 and SHA-1 only; the whole pack and
+all inflated objects are held in memory, and a single object larger than 2 GiB
+is rejected; local transfers copy every object instead of using
+.B have
+negotiation, and
+.B \-\-depth
+is rejected for local repositories; pull is fast-forward-only (no merge, rebase,
+or conflict resolution); pull cannot fetch into a shallow clone, cannot run in a
 bare repository, or switch away from an existing branch (from a detached HEAD it
 can check out a branch when that is a fast-forward or the local tip is ahead);
 .B \-\-prune

@@ -1,5 +1,7 @@
 #include "checkout.h"
 #include "http.h"
+#include "local.h"
+#include "odb.h"
 #include "protocol.h"
 #include "repo.h"
 #include "update.h"
@@ -22,10 +24,11 @@ static void usage(FILE *out)
     fprintf(out,
             "usage: cgc [options] <repository> [directory]\n"
             "\n"
-            "Clone a Git repository over HTTPS.\n"
+            "Clone a Git repository over HTTPS or from a local path.\n"
             "\n"
             "repository:\n"
             "  https://github.com/owner/repo(.git)   explicit URL\n"
+            "  /path/to/repo or file:///path/to/repo local repository\n"
             "  gh:owner/repo                         GitHub shorthand\n"
             "  gl:owner/repo                         GitLab shorthand\n"
             "  bb:owner/repo                         Bitbucket shorthand\n"
@@ -264,6 +267,47 @@ static void on_signal(int sig)
     cgc_interrupted = 1;
 }
 
+/* Follow annotated tag objects until a commit is reached. */
+static int peel_to_commit(const char *gitdir,
+                          const unsigned char oid[OID_RAW],
+                          unsigned char out[OID_RAW])
+{
+    unsigned char cur[OID_RAW];
+    memcpy(cur, oid, OID_RAW);
+
+    for (int depth = 0; depth < 32; depth++) {
+        int type = 0;
+        Buf b;
+        buf_init(&b);
+        int r = odb_read(gitdir, cur, &type, &b);
+        if (r <= 0) {
+            buf_free(&b);
+            return -1;
+        }
+        if (type == OBJ_COMMIT) {
+            memcpy(out, cur, OID_RAW);
+            buf_free(&b);
+            return 0;
+        }
+        if (type != OBJ_TAG) {
+            buf_free(&b);
+            return -1;
+        }
+
+        char *line = (char *)b.data;
+        char *nl = line ? strchr(line, '\n') : NULL;
+        if (nl)
+            *nl = '\0';
+        if (!line || strncmp(line, "object ", 7) != 0 ||
+            oid_parse(line + 7, cur) != 0) {
+            buf_free(&b);
+            return -1;
+        }
+        buf_free(&b);
+    }
+    return -1;
+}
+
 int main(int argc, char **argv)
 {
     atexit(cleanup_atexit);
@@ -384,6 +428,10 @@ int main(int argc, char **argv)
     char *derived_name;
     url_resolve(positional[0], host, &url, &derived_name);
 
+    int local = url_is_local(url);
+    if (local && depth > 0)
+        die("--depth is not supported for local repositories yet");
+
     /* Strip any embedded credentials from the URL so they are not persisted
      * in .git/config. Use --token / CGC_TOKEN / GIT_TOKEN for auth. */
     {
@@ -441,7 +489,9 @@ int main(int argc, char **argv)
         single_branch = 1;
 
     RemoteRefs refs;
-    if (protocol_ls_refs(url, &refs) != 0) {
+    int ls_rc = local ? local_ls_refs(url, &refs)
+                      : protocol_ls_refs(url, &refs);
+    if (ls_rc != 0) {
         remote_refs_free(&refs);
         die("cannot read refs from %s", url);
     }
@@ -586,7 +636,10 @@ int main(int argc, char **argv)
     }
 
     if (!refs.empty) {
-        if (protocol_fetch(url, &refs, gitdir, depth, NULL, 0) != 0) {
+        int fetch_rc = local ? local_fetch(url, gitdir, depth)
+                             : protocol_fetch(url, &refs, gitdir, depth,
+                                              NULL, 0);
+        if (fetch_rc != 0) {
             remote_refs_free(&refs);
             die("fetch failed");
         }
@@ -595,6 +648,24 @@ int main(int argc, char **argv)
         if (write_rc != 0) {
             remote_refs_free(&refs);
             die("cannot write refs");
+        }
+
+        /* Local refs may not advertise peeled tag targets. Now that the
+         * objects exist, resolve an annotated tag before setting up checkout. */
+        if (detached && has_target) {
+            unsigned char commit_oid[OID_RAW];
+            if (peel_to_commit(gitdir, target_oid, commit_oid) != 0) {
+                remote_refs_free(&refs);
+                die("cannot resolve tag '%s' to a commit",
+                    branch ? branch : "HEAD");
+            }
+            if (memcmp(commit_oid, target_oid, OID_RAW) != 0) {
+                memcpy(target_oid, commit_oid, OID_RAW);
+                if (repo_set_head_detached(gitdir, target_oid) != 0) {
+                    remote_refs_free(&refs);
+                    die("cannot write HEAD");
+                }
+            }
         }
 
         if (has_target && !bare && !no_checkout) {

@@ -3,6 +3,8 @@
 ## Supported
 
 - Smart HTTP protocol v2 over HTTPS (plain HTTP is accepted for local testing)
+- Local-path and `file://` transports, including bare repositories, linked
+  worktrees (`.git` files and `commondir`), packed refs, and source packfiles
 - Redirects, chunked transfer encoding, and verified TLS
 - Branches, annotated tags, remote-tracking refs
 - `--branch`/`-b` to check out a branch or tag (detached HEAD for tags)
@@ -30,7 +32,10 @@
 
 ## Limitations (v1)
 
-- No SSH, `git://` or local-path transports.
+- No SSH or `git://` transport.
+- Local transfers copy every object in the source repository instead of using
+  `have` negotiation, and `--depth` is rejected for local sources. Source
+  packfiles are unpacked into loose objects rather than copied as packs.
 - HTTPS bearer-token authentication is supported (`--token`, `--token-file`,
   `CGC_TOKEN`, `GIT_TOKEN`); SSH keys and other credential helpers are not.
 - Protocol v2 only; servers that only speak protocol v0/v1 are rejected.

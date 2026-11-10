@@ -20,6 +20,10 @@ use a custom remote name (`--origin <name>`), or skip tags (`--no-tags`). Fetch
 and pull follow the first remote configured in `.git/config`, so non-`origin`
 remote names update `refs/remotes/<name>/*`.
 
+Besides smart HTTP, `cgc` clones and fetches from local repositories by reading
+their refs and objects directly, including bare repositories, `file://` URLs,
+and linked worktrees. It never invokes `git`.
+
 Fetch and pull update remote-tracking refs and tags safely: a local tag that
 differs from the remote is refused unless `--force` is given, `--no-tags` skips
 tags, and `--prune` removes remote-tracking refs for deleted branches (including

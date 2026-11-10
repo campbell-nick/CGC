@@ -347,4 +347,92 @@ test -z "$(git status --porcelain)"
 
 cd "$ROOT"
 
+# ---------------------------------------------------------------------------
+# local-path transport
+# ---------------------------------------------------------------------------
+git -C "$WORK/src" gc -q
+
+"$ROOT/cgc" -q "$WORK/src" "$WORK/local"
+git -C "$WORK/local" fsck --full
+test -z "$(git -C "$WORK/local" status --porcelain)"
+test "$(git -C "$WORK/local" rev-parse HEAD)" = \
+     "$(git -C "$WORK/src" rev-parse HEAD)"
+test "$(git -C "$WORK/local" rev-parse refs/remotes/origin/dev)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/dev)"
+
+# A bare source exercises packed-refs and packfile unpacking.
+"$ROOT/cgc" -q "$WORK/server/repo.git" "$WORK/localbare"
+git -C "$WORK/localbare" fsck --full
+test -z "$(git -C "$WORK/localbare" status --porcelain)"
+test "$(git -C "$WORK/localbare" rev-parse HEAD)" = \
+     "$(git -C "$WORK/server/repo.git" rev-parse HEAD)"
+
+# file:// URLs resolve to the same local transport.
+"$ROOT/cgc" -q "file://$WORK/src" "$WORK/localfile"
+git -C "$WORK/localfile" fsck --full
+test -z "$(git -C "$WORK/localfile" status --porcelain)"
+
+# An annotated tag selected from a local source is peeled to its commit.
+"$ROOT/cgc" -q --branch v1 "$WORK/src" "$WORK/localtag"
+test "$(git -C "$WORK/localtag" rev-parse HEAD)" = \
+     "$(git -C "$WORK/src" rev-parse 'v1^{commit}')"
+test -z "$(git -C "$WORK/localtag" symbolic-ref -q HEAD)"
+git -C "$WORK/localtag" fsck --full
+test -z "$(git -C "$WORK/localtag" status --porcelain)"
+
+# Local --bare and --no-tags behave like their HTTP equivalents.
+"$ROOT/cgc" -q --bare "$WORK/src" "$WORK/local.git"
+test "$(git -C "$WORK/local.git" rev-parse --is-bare-repository)" = true
+test ! -e "$WORK/local.git/.git"
+git -C "$WORK/local.git" fsck --full
+
+"$ROOT/cgc" -q --no-tags "$WORK/src" "$WORK/localnotags"
+test -z "$(git -C "$WORK/localnotags" for-each-ref \
+     --format='%(refname)' refs/tags)"
+
+# Local fetch and pull follow a non-origin remote.
+"$ROOT/cgc" -q --origin upstream "$WORK/src" "$WORK/localorigin"
+test "$(git -C "$WORK/localorigin" rev-parse refs/remotes/upstream/main)" = \
+     "$(git -C "$WORK/src" rev-parse refs/heads/main)"
+test ! -e "$WORK/localorigin/.git/refs/remotes/origin"
+
+printf 'local pull\n' > "$WORK/src/local-pull.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "local pull"
+LOCAL_PULL_HEAD=$(git -C "$WORK/src" rev-parse HEAD)
+(cd "$WORK/localorigin" && "$ROOT/cgc" pull -q)
+test -f "$WORK/localorigin/local-pull.txt"
+test "$(git -C "$WORK/localorigin" rev-parse HEAD)" = "$LOCAL_PULL_HEAD"
+test "$(git -C "$WORK/localorigin" rev-parse refs/remotes/upstream/main)" = \
+     "$LOCAL_PULL_HEAD"
+git -C "$WORK/localorigin" fsck --full
+test -z "$(git -C "$WORK/localorigin" status --porcelain)"
+
+# A bare local repository records FETCH_HEAD and leaves refs alone.
+"$ROOT/cgc" -q --bare "$WORK/src" "$WORK/localfetch.git"
+LOCAL_BARE_HEAD=$(git -C "$WORK/localfetch.git" rev-parse refs/heads/main)
+printf 'local fetch\n' > "$WORK/src/local-fetch.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "local fetch"
+LOCAL_FETCH_HEAD=$(git -C "$WORK/src" rev-parse HEAD)
+(cd "$WORK/localfetch.git" && "$ROOT/cgc" fetch -q)
+test "$(git -C "$WORK/localfetch.git" rev-parse refs/heads/main)" = \
+     "$LOCAL_BARE_HEAD"
+grep -q "^$LOCAL_FETCH_HEAD" "$WORK/localfetch.git/FETCH_HEAD"
+
+# A linked worktree is found through its .git file and commondir.
+git -C "$WORK/src" worktree add -q "$WORK/linked" dev
+"$ROOT/cgc" -q "$WORK/linked" "$WORK/linkedclone"
+git -C "$WORK/linkedclone" fsck --full
+test -z "$(git -C "$WORK/linkedclone" status --porcelain)"
+test "$(git -C "$WORK/linkedclone" symbolic-ref HEAD)" = refs/heads/dev
+git -C "$WORK/src" worktree remove "$WORK/linked"
+
+# --depth is rejected for local repositories before creating anything.
+if "$ROOT/cgc" --depth 1 "$WORK/src" "$WORK/localdepth" >/dev/null 2>&1; then
+    echo "smoke: --depth was accepted for a local repository" >&2
+    exit 1
+fi
+test ! -e "$WORK/localdepth"
+
 echo "smoke test passed"

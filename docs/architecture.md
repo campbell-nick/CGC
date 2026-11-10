@@ -2,8 +2,10 @@
 
 ## How it works
 
-1. **Address resolution** (`url.c`) — turns a URL or shorthand into an HTTPS
-   URL and a default directory name.
+1. **Address resolution** (`url.c`) — turns a URL, shorthand, or local path into
+   an HTTPS URL or an absolute filesystem path, plus a default directory name.
+   `file://` URLs and `~` are expanded; a path ending in `/.git` derives the
+   parent directory name.
 2. **Repository skeleton** (`repo.c`) — creates `.git/objects`, `.git/refs`,
    `HEAD`, and a basic config.
 3. **Capability discovery** (`protocol.c`, `http.c`) — `GET
@@ -28,6 +30,30 @@
    index so Git sees a clean working tree. `--bare` and `--no-checkout` skip
    this step.
 
+## Local transport
+
+For local paths and `file://` URLs, `url.c` resolves an absolute path and
+`local.c` replaces the HTTP protocol layer:
+
+1. **Locate the git directory** — accept a bare repository, a working tree with
+   a `.git` directory, or a `.git` file pointing at a linked worktree's gitdir.
+   A linked worktree's `commondir` file supplies the shared object and ref
+   directories.
+2. **List refs** — parse `packed-refs` (including peeled `^` lines), walk loose
+   refs under `refs/heads` and `refs/tags`, and read `HEAD`. The result uses the
+   same `RemoteRefs` structure as protocol v2, so clone and update logic is
+   shared.
+3. **Copy objects** — copy loose objects that are missing from the destination,
+   then unpack every source `.pack` file into destination loose objects. The
+   source `shallow` file is copied when present.
+4. **Annotated tags** — local ref listing has no peeled-commit advertisement, so
+   after objects are copied a tag selected with `--branch` is peeled to its
+   commit before checkout.
+
+Local transfers deliberately copy all objects rather than negotiating `have`
+lines. `--depth` is rejected for local sources because the pack reader has no
+local history walker.
+
 ## Incremental fetch and pull
 
 `cgc fetch` and `cgc pull` reuse the same protocol and pack layers with a
@@ -39,6 +65,8 @@ different flow (`update.c`):
 2. **Negotiate** — list refs as before, then send `command=fetch` with a `want`
    for each remote ref and `have` lines for every local ref, branch and tag.
    The server sends only objects reachable from the wants but not the haves.
+   For a local remote, `local.c` lists refs and copies all objects directly
+   instead of negotiating.
 3. **Unpack** — the same pack reader writes the new objects. An empty pack
    means the clone was already up to date.
 4. **Fetch bookkeeping** — rewrite `refs/remotes/<remote>/*` and tags. Existing
@@ -63,8 +91,9 @@ different flow (`update.c`):
 ```
 src/
   main.c       CLI, shorthand parsing, clone and subcommand dispatch
-  url.c        URL parsing and shorthand resolution
+  url.c        URL parsing, local-path detection, shorthand resolution
   http.c       HTTP/1.1 over TCP + OpenSSL, chunked bodies, redirects
+  local.c      local repository discovery, refs, object and pack copying
   pktline.c    Git pkt-line framing
   protocol.c   protocol v2: discovery, ls-refs, fetch, sideband
   progress.c   Git-style status output and progress meters

@@ -13,6 +13,8 @@ suffix, matching `git clone --bare`.
 | Argument | Resolves to |
 | --- | --- |
 | `https://github.com/owner/repo.git` | the URL as given |
+| `/path/to/repo`, `./repo`, `~/repo` | the local repository path |
+| `file:///path/to/repo` | the local repository path |
 | `gh:owner/repo` | `https://github.com/owner/repo.git` |
 | `gl:owner/repo` | `https://gitlab.com/owner/repo.git` |
 | `bb:owner/repo` | `https://bitbucket.org/owner/repo.git` |
@@ -22,6 +24,11 @@ suffix, matching `git clone --bare`.
 
 The default host is `github.com`, overridable with `--host` or the
 `CGC_DEFAULT_HOST` environment variable.
+
+Local repositories are read directly: `cgc` reads their refs and objects and
+copies them into the destination, including packed objects. Working trees with
+a `.git` directory or `.git` file (linked worktrees), bare repositories, and
+`file://` URLs are supported. `git` is never invoked.
 
 ## Examples
 
@@ -36,6 +43,8 @@ cgc --bare gh:owner/repo
 cgc --no-checkout gh:owner/repo
 cgc --origin upstream gh:owner/repo
 cgc --no-tags gh:owner/repo
+cgc /srv/git/project.git
+cgc file:///srv/git/project.git project-copy
 ```
 
 ## Subcommands
@@ -57,6 +66,11 @@ for the repository.
 In a bare repository, `fetch` writes `FETCH_HEAD` and leaves refs unchanged,
 matching Git's default when no fetch refspec is configured. `pull` is refused
 in a bare repository because there is no working tree to update.
+
+When the configured remote is a local path or `file://` URL, `fetch` and `pull`
+copy objects directly from the source repository, including unpacking any
+source packfiles. Local transfers copy all objects rather than negotiating with
+`have` lines, so they may copy more data than an HTTP fetch.
 
 Pull is fast-forward-only. It refuses when the remote branch is not a
 descendant of the local branch, when an affected file has local modifications,
@@ -96,6 +110,7 @@ and `pull` writes `.git/ORIG_HEAD` before moving `HEAD`.
 --force         overwrite a local tag that differs from the remote
 --prune         delete stale refs under refs/remotes/<remote>
 --depth <n>     create a shallow clone with history truncated to n commits
+                (HTTP sources only; rejected for local repositories)
 --single-branch clone only the history of one branch
 --no-single-branch
                 fetch all branches (default unless --depth is given)

@@ -1,8 +1,10 @@
 #include "update.h"
 #include "checkout.h"
+#include "local.h"
 #include "odb.h"
 #include "protocol.h"
 #include "repo.h"
+#include "url.h"
 #include "util.h"
 
 #include <errno.h>
@@ -440,6 +442,7 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
         warn_cgc("no remote configured");
         goto done;
     }
+    int local = url_is_local(url);
 
     unsigned char head_oid[OID_RAW];
     int has_head = 0;
@@ -469,7 +472,9 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
         goto done;
     }
 
-    if (protocol_ls_refs(url, &refs) != 0) {
+    int ls_rc = local ? local_ls_refs(url, &refs)
+                      : protocol_ls_refs(url, &refs);
+    if (ls_rc != 0) {
         warn_cgc("could not list remote refs");
         goto done;
     }
@@ -519,8 +524,12 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
         goto done;
     }
 
-    if (protocol_fetch(url, active, gitdir, 0,
-                       (const unsigned char (*)[OID_RAW])haves, nhaves) != 0) {
+    int fetch_rc = local ? local_fetch(url, gitdir, 0)
+                         : protocol_fetch(
+                               url, active, gitdir, 0,
+                               (const unsigned char (*)[OID_RAW])haves,
+                               nhaves);
+    if (fetch_rc != 0) {
         warn_cgc("fetch failed");
         goto done;
     }

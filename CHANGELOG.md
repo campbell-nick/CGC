@@ -32,6 +32,13 @@ All notable changes to this project are documented here. The format follows
   hard-coded `origin`, and prune/update `refs/remotes/<name>/*` accordingly.
 - Bare-repository detection for `fetch`; a bare fetch writes `FETCH_HEAD` and
   leaves refs unchanged, and `pull` is refused.
+- Local-path and `file://` transports for clone, fetch, and pull. Local
+  repositories are read directly without invoking `git`, including bare
+  repositories, linked worktrees (`.git` files and `commondir`), packed refs,
+  and source packfiles. Objects and packed objects are copied into the
+  destination.
+- Annotated tags selected with `--branch` from a local repository are peeled to
+  their commit before checkout.
 - `--prune` to delete remote-tracking refs for branches deleted upstream,
   including entries in `packed-refs`.
 - `.git/FETCH_HEAD` for fetch and pull, and `.git/ORIG_HEAD` before a pull
@@ -41,6 +48,9 @@ All notable changes to this project are documented here. The format follows
   flags, and staged-change handling.
 - End-to-end coverage for `--bare`, `--no-checkout`, `--origin`, clone
   `--no-tags`, non-`origin` fetches, and bare fetch behavior.
+- End-to-end coverage for local clone, bare and `file://` sources, local
+  `--bare`/`--no-tags`/`--origin`, local pull and bare fetch, linked worktrees,
+  and local `--depth` rejection.
 
 ### Changed
 
