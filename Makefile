@@ -9,7 +9,7 @@ LDLIBS   ?=
 
 VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.1.0)
 
-STDFLAGS  := -std=c11 -D_POSIX_C_SOURCE=200809L
+STDFLAGS  := -std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700
 WARNFLAGS := -Wall -Wextra -Wno-unused-parameter
 ALL_CFLAGS := $(CFLAGS) $(STDFLAGS) $(WARNFLAGS)
 
@@ -66,8 +66,12 @@ analyze:
 	$(CLANG_TIDY) -checks='$(ANALYZE_CHECKS)' $(SRC) -- \
 		$(ALL_CPPFLAGS) $(ALL_CFLAGS)
 
+features: cgc
+	./tests/features.sh
+
 test: check cgc
 	./tests/smoke.sh
+	./tests/features.sh
 
 dist:
 	rm -rf "dist/$(DISTNAME)" "dist/$(DISTNAME).tar.gz"
@@ -96,4 +100,4 @@ clean:
 distclean: clean
 	rm -rf dist
 
-.PHONY: all analyze check clean dist distclean install test uninstall
+.PHONY: all analyze check clean dist distclean features install test uninstall

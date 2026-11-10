@@ -100,7 +100,7 @@ static int parse_v0_caps(RemoteRefs *out, const char *caps, char **symref_head)
 }
 
 /* Parse a v0 ref advertisement into the same shape used by protocol v2. */
-static int parse_v0_refs(PktReader *pr, RemoteRefs *out)
+static int parse_v0_refs(PktReader *pr, RemoteRefs *out, int all_refs)
 {
     const unsigned char *line;
     size_t linelen;
@@ -160,7 +160,7 @@ static int parse_v0_refs(PktReader *pr, RemoteRefs *out)
 
         if (strcmp(name, "HEAD") != 0 &&
             (!ref_name_is_valid(name) ||
-             (strncmp(name, "refs/heads/", 11) != 0 &&
+             (!all_refs && strncmp(name, "refs/heads/", 11) != 0 &&
               strncmp(name, "refs/tags/", 10) != 0))) {
             free(name);
             continue;
@@ -190,7 +190,8 @@ fail:
     return -1;
 }
 
-static int discover(const char *url, int *unborn_ok, RemoteRefs *out)
+static int discover(const char *url, int *unborn_ok, RemoteRefs *out,
+                    int all_refs)
 {
     *unborn_ok = 0;
     char *u = endpoint(url, "/info/refs?service=git-upload-pack");
@@ -249,7 +250,7 @@ static int discover(const char *url, int *unborn_ok, RemoteRefs *out)
     /* No v2 banner: fall back to the protocol v0 ref advertisement. */
     if (kind == PKT_DATA) {
         pr.pos -= 4 + linelen;
-        if (parse_v0_refs(&pr, out) != 0) {
+        if (parse_v0_refs(&pr, out, all_refs) != 0) {
             warn_cgc("malformed ref advertisement");
             http_response_free(&resp);
             return -1;
@@ -393,12 +394,12 @@ static void select_default_ref(RemoteRefs *out)
     }
 }
 
-int protocol_ls_refs(const char *url, RemoteRefs *out)
+int protocol_ls_refs(const char *url, int all_refs, RemoteRefs *out)
 {
     memset(out, 0, sizeof(*out));
 
     int unborn_ok = 0;
-    int version = discover(url, &unborn_ok, out);
+    int version = discover(url, &unborn_ok, out, all_refs);
     if (version < 0)
         return -1;
     if (version == 1) {
@@ -417,8 +418,12 @@ int protocol_ls_refs(const char *url, RemoteRefs *out)
     if (unborn_ok)
         pkt_write_str(&req, "unborn\n");
     pkt_write_str(&req, "ref-prefix HEAD\n");
-    pkt_write_str(&req, "ref-prefix refs/heads/\n");
-    pkt_write_str(&req, "ref-prefix refs/tags/\n");
+    if (all_refs) {
+        pkt_write_str(&req, "ref-prefix refs/\n");
+    } else {
+        pkt_write_str(&req, "ref-prefix refs/heads/\n");
+        pkt_write_str(&req, "ref-prefix refs/tags/\n");
+    }
     pkt_flush(&req);
 
     HttpResponse resp;
@@ -743,10 +748,11 @@ static int collect_wants(const RemoteRefs *refs,
         if (!oid_seen(wants, nwants, r->oid))
             memcpy(wants[nwants++], r->oid, OID_RAW);
     }
+    /* The default branch is normally part of the ref list, so its tip is
+     * already a want. Only fall back to default_oid when no refs were listed
+     * (for example a HEAD-only advertisement); adding it after filtering out
+     * the default branch would fetch history the caller did not ask for. */
     if (nwants == 0 && refs->has_default_oid)
-        memcpy(wants[nwants++], refs->default_oid, OID_RAW);
-    else if (refs->has_default_oid &&
-             !oid_seen(wants, nwants, refs->default_oid))
         memcpy(wants[nwants++], refs->default_oid, OID_RAW);
 
     *out = wants;

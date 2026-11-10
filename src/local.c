@@ -206,7 +206,7 @@ static int parse_ref_content(Buf *b, Ref *ref)
     return oid_parse(s, ref->oid) == 0 ? 0 : -1;
 }
 
-static int read_packed_refs(const char *gitdir, RemoteRefs *out)
+static int read_packed_refs(const char *gitdir, int all_refs, RemoteRefs *out)
 {
     char *path = path_join(gitdir, "packed-refs");
     Buf b;
@@ -247,7 +247,7 @@ static int read_packed_refs(const char *gitdir, RemoteRefs *out)
             continue;
 
         const char *name = line + OID_HEX + 1;
-        if ((strncmp(name, "refs/heads/", 11) != 0 &&
+        if ((!all_refs && strncmp(name, "refs/heads/", 11) != 0 &&
              strncmp(name, "refs/tags/", 10) != 0) ||
             !ref_name_is_valid(name)) {
             prev = NULL;
@@ -425,7 +425,7 @@ static int finish_refs(RemoteRefs *out)
     return 0;
 }
 
-int local_ls_refs(const char *path, RemoteRefs *out)
+int local_ls_refs(const char *path, int all_refs, RemoteRefs *out)
 {
     memset(out, 0, sizeof(*out));
 
@@ -436,11 +436,14 @@ int local_ls_refs(const char *path, RemoteRefs *out)
     }
     char *common = common_gitdir(gitdir);
 
-    int rc = read_packed_refs(common, out);
-    if (rc == 0)
+    int rc = read_packed_refs(common, all_refs, out);
+    if (rc == 0 && all_refs) {
+        rc = read_loose_refs(common, "refs", out);
+    } else if (rc == 0) {
         rc = read_loose_refs(common, "refs/heads", out);
-    if (rc == 0)
-        rc = read_loose_refs(common, "refs/tags", out);
+        if (rc == 0)
+            rc = read_loose_refs(common, "refs/tags", out);
+    }
     if (rc == 0)
         rc = read_head(gitdir, out);
     if (rc == 0)

@@ -51,7 +51,8 @@ Verified against GitHub and against `git http-backend` with repositories that
 contain branches, annotated tags, nested trees, symlinks, executables and
 deltas (both `ofs-delta` and `ref-delta`). Clones pass `git fsck --full` and
 `git status` is clean; pulls are verified the same way. `make check` runs
-offline unit and pack tests; `make test` adds the end-to-end smoke test.
+offline unit and pack tests; `make test` adds the end-to-end smoke test and the
+comprehensive feature matrix (`make features` runs the matrix on its own).
 
 ## Documentation
 

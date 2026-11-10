@@ -219,12 +219,22 @@ int repo_write_refs(const char *gitdir, const RemoteRefs *refs,
         buf_init(&target);
         buf_appendf(&target, "refs/remotes/%s/%s", remote,
                     refs->default_ref + 11);
-        Buf head;
-        buf_init(&head);
-        buf_appendf(&head, "refs/remotes/%s/HEAD", remote);
-        int rc = write_symref_file(gitdir, (char *)head.data,
+
+        /* A single-branch or --branch clone may not fetch the remote's
+         * default branch. Do not leave refs/remotes/<remote>/HEAD pointing at
+         * a ref that does not exist (git fsck rejects that). */
+        unsigned char existing[OID_RAW];
+        int have_target = repo_read_ref(gitdir, (char *)target.data,
+                                        existing) == 0;
+        int rc = 0;
+        if (have_target) {
+            Buf head;
+            buf_init(&head);
+            buf_appendf(&head, "refs/remotes/%s/HEAD", remote);
+            rc = write_symref_file(gitdir, (char *)head.data,
                                    (char *)target.data);
-        buf_free(&head);
+            buf_free(&head);
+        }
         buf_free(&target);
         if (rc != 0)
             return -1;

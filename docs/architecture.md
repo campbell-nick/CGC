@@ -50,9 +50,10 @@ For local paths and `file://` URLs, `url.c` resolves an absolute path and
    A linked worktree's `commondir` file supplies the shared object and ref
    directories.
 2. **List refs** — parse `packed-refs` (including peeled `^` lines), walk loose
-   refs under `refs/heads` and `refs/tags`, and read `HEAD`. The result uses the
-   same `RemoteRefs` structure as protocol v2, so clone and update logic is
-   shared.
+   refs, and read `HEAD`. Normal clones limit the walk to `refs/heads` and
+   `refs/tags`; mirrors and custom refspecs also read other namespaces such as
+   `refs/notes`. The result uses the same `RemoteRefs` structure as protocol
+   v2, so clone and update logic is shared.
 3. **Copy objects** — copy loose objects that are missing from the destination,
    then unpack every source `.pack` file into destination loose objects. The
    source `shallow` file is copied when present.

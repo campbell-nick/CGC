@@ -77,6 +77,10 @@ All notable changes to this project are documented here. The format follows
   `origin/HEAD`.
 - Unit coverage for refspec parsing, force and wildcard mapping, destination
   matching, negative refspecs, and invalid refspec rejection.
+- A comprehensive `tests/features.sh` matrix, also available as
+  `make features` and run by `make test`, covering CLI validation, clone
+  modes, fetch/pull semantics, refspecs, multiple remotes, mirrors, local
+  transport, and protocol v0.
 
 ### Changed
 
@@ -97,6 +101,21 @@ All notable changes to this project are documented here. The format follows
   `origin`, or the first configured remote, instead of always using the first
   remote. A bare repository with no fetch refspec still records only
   `FETCH_HEAD`, but its summary now lists the fetched refs.
+
+### Fixed
+
+- Mirror clones and fetches now copy refs outside `refs/heads` and `refs/tags`,
+  notably `refs/notes/*`, over HTTP, local paths, and protocol v0.
+- Local transport lists arbitrary refs under `refs/` when a mirror or a custom
+  fetch refspec needs them, instead of exposing only branches and tags.
+- Single-branch and shallow `--branch` clones no longer leave a dangling
+  `refs/remotes/<remote>/HEAD` symref pointing at an unfetched branch.
+- Shallow fetches no longer request the remote default branch after it has
+  been filtered out by `--branch` or a narrow refspec.
+- `realpath` is now declared via `_XOPEN_SOURCE=700`, fixing builds at `-O0`
+  and `-O1` and under sanitizers where the declaration was previously hidden.
+- `--token-file` followed by `--help` or `--version` no longer leaks the token
+  buffer.
 
 ## [0.2.0] - 2026-11-09
 

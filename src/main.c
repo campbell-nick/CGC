@@ -358,9 +358,11 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
+            free(token_storage);
             usage(stdout);
             return 0;
         } else if (strcmp(a, "-V") == 0 || strcmp(a, "--version") == 0) {
+            free(token_storage);
             printf("cgc %s\n", CGC_VERSION);
             return 0;
         } else if (strcmp(a, "-q") == 0 || strcmp(a, "--quiet") == 0) {
@@ -503,8 +505,8 @@ int main(int argc, char **argv)
         single_branch = 0;
 
     RemoteRefs refs;
-    int ls_rc = local ? local_ls_refs(url, &refs)
-                      : protocol_ls_refs(url, &refs);
+    int ls_rc = local ? local_ls_refs(url, mirror, &refs)
+                      : protocol_ls_refs(url, mirror, &refs);
     if (ls_rc != 0) {
         remote_refs_free(&refs);
         die("cannot read refs from %s", url);

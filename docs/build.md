@@ -43,8 +43,9 @@ After installing, `man cgc` shows the manual page.
 ## Tests
 
 ```sh
-make check   # unit tests and pack round-trip tests (no network)
-make test    # everything in check, plus the end-to-end smoke test
+make check    # unit tests and pack round-trip tests (no network)
+make features # comprehensive end-to-end feature matrix
+make test     # everything in check, plus smoke and feature tests
 ```
 
 `make check` runs:
@@ -63,6 +64,11 @@ transfer encoding, clones it with `cgc`, and verifies the result with `git
 fsck`, `git status`, and ref comparisons. It also checks `--quiet`, cloning an
 empty repository, fetch/pull/update, and the refusal paths for a dirty worktree
 and a non-fast-forward update.
+
+`tests/features.sh` is a wider matrix that checks CLI validation, every clone
+mode, fetch/pull/update semantics, refspecs and multiple remotes, mirrors
+(including notes), local and `file://` transport, shallow clones, and protocol
+v0. It verifies results with `git fsck`, `git status`, and ref comparisons.
 
 Sanitizer builds can be run locally:
 

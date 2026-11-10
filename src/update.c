@@ -574,8 +574,18 @@ int update_run(const char *start_dir, const char *branch_opt, int pull,
         }
     }
 
-    int ls_rc = local ? local_ls_refs(url, &refs)
-                      : protocol_ls_refs(url, &refs);
+    /* Mirror fetches need every ref. A custom refspec may also target
+     * namespaces outside refs/heads and refs/tags (for example refs/notes),
+     * so ask the remote for all refs in that case too. */
+    int all_refs = mirror;
+    for (size_t i = 0; !all_refs && i < spec.count; i++) {
+        const char *src = spec.items[i].src;
+        if (strncmp(src, "refs/heads/", 11) != 0 &&
+            strncmp(src, "refs/tags/", 10) != 0)
+            all_refs = 1;
+    }
+    int ls_rc = local ? local_ls_refs(url, all_refs, &refs)
+                      : protocol_ls_refs(url, all_refs, &refs);
     if (ls_rc != 0) {
         warn_cgc("could not list remote refs");
         goto done;

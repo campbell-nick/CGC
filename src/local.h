@@ -8,8 +8,9 @@
 int local_repo_gitdir(const char *path, char **out_gitdir);
 
 /* List refs from a local repository using the same RemoteRefs shape as the
- * smart HTTP client. */
-int local_ls_refs(const char *path, RemoteRefs *out);
+ * smart HTTP client. When all_refs is non-zero, include every ref under refs/
+ * (needed for mirrors and custom refspecs); otherwise only branches and tags. */
+int local_ls_refs(const char *path, int all_refs, RemoteRefs *out);
 
 /* Copy all reachable-by-ref objects from a local repository into gitdir,
  * unpacking source packfiles into loose objects. depth must be 0. */

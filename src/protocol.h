@@ -31,8 +31,10 @@ typedef struct {
 
 void remote_refs_free(RemoteRefs *r);
 
-/* Discover capabilities and list refs via protocol v2. */
-int protocol_ls_refs(const char *url, RemoteRefs *out);
+/* Discover capabilities and list refs via protocol v2. When all_refs is
+ * non-zero, advertise every ref under refs/ (needed for mirrors and custom
+ * refspecs); otherwise only branches and tags are requested. */
+int protocol_ls_refs(const char *url, int all_refs, RemoteRefs *out);
 
 /* Fetch the pack needed for all refs and unpack it into the object db.
  * If depth > 0, perform a shallow fetch of that depth and write .git/shallow.
