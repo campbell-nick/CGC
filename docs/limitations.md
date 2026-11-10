@@ -7,6 +7,10 @@
 - Local-path and `file://` transports, including bare repositories, linked
   worktrees (`.git` files and `commondir`), packed refs, and source packfiles
 - Redirects, chunked transfer encoding, and verified TLS
+- Connect, read, and write timeouts (`CGC_HTTP_TIMEOUT`) and retries with
+  backoff for transient `GET`/`HEAD` failures (`CGC_HTTP_RETRIES`)
+- HTTP and HTTPS proxies (`http_proxy`, `https_proxy`, `all_proxy`), proxy
+  authentication, and `NO_PROXY` bypass
 - Branches, annotated tags, remote-tracking refs
 - `--branch`/`-b` to check out a branch or tag (detached HEAD for tags)
 - `--depth <n>` shallow clones (writes `.git/shallow`), with `--single-branch`
@@ -27,6 +31,8 @@
 - `.git/FETCH_HEAD` and `.git/ORIG_HEAD` updates
 - Atomic ref, index, and metadata writes
 - `ofs-delta` and `ref-delta` resolution, including delta chains
+- Self-contained HTTP packs are retained as `objects/pack/pack-<sha>.pack`
+  with a v2 `.idx` and read directly; thin packs fall back to loose objects
 - Nested trees, symlinks, executable files
 - Empty repositories (creates `.git` with the advertised default branch)
 - A Git-compatible index: `git status` and `git log` work immediately
@@ -39,7 +45,8 @@
 - No SSH or `git://` transport.
 - Local transfers copy every object in the source repository instead of using
   `have` negotiation, and `--depth` is rejected for local sources. Source
-  packfiles are unpacked into loose objects rather than copied as packs.
+  packfiles are re-packed into new destination packs rather than copied
+  verbatim, so local copies do not preserve the source pack layout.
 - HTTPS bearer-token authentication is supported (`--token`, `--token-file`,
   `CGC_TOKEN`, `GIT_TOKEN`); SSH keys and other credential helpers are not.
 - Protocol v0 fallback covers the common smart-HTTP upload-pack flow; protocol
@@ -66,14 +73,13 @@
   A conflicting local tag is refused unless `--force` is given.
 - No partial/filtered clone, no submodule recursion (`--recursive`), no Git LFS,
   no hooks, no reflogs.
-- No retry or resume on network failures.
+- Retries cover idempotent `GET`/`HEAD` requests only; a fetch `POST` is not
+  retried, and there is no resume of an interrupted transfer.
 
 ## Roadmap
 
 - Stream packfiles and objects to bound memory use
-- Keep the pack and write a `.idx` instead of exploding into loose objects
 - Merge/rebase support and shallow fetch (`--deepen`)
-- Connect/read timeouts, retries with backoff, and proxy support
 - SSH transport
 - Partial clone
 - Submodule clone and update

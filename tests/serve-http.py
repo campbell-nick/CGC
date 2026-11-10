@@ -1,21 +1,36 @@
 #!/usr/bin/env python3
 """Tiny smart-HTTP server backed by `git http-backend`, used by smoke.sh.
 
-usage: serve-http.py <git-project-root> <port> [length|chunked|v0]
+usage: serve-http.py <git-project-root> <port> [length|chunked|v0|flaky|stall]
 
 The optional third argument selects how response bodies are framed. The
 default is Content-Length; "chunked" exercises cgc's chunked decoder, and
 "v0" hides the Git-Protocol header so git http-backend falls back to
-protocol v0.
+protocol v0. "flaky" returns 503 for the first FLAKY_FAILS requests (default
+1), and "stall" accepts the request but never responds, for timeout tests.
 """
 import os
 import subprocess
 import sys
+import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.abspath(sys.argv[1])
 MODE = sys.argv[3] if len(sys.argv) > 3 else "length"
+FLAKY_FAILS = int(os.environ.get("FLAKY_FAILS", "1"))
+_flaky_lock = threading.Lock()
+_flaky_left = FLAKY_FAILS
+
+
+def flaky_fail():
+    global _flaky_left
+    with _flaky_lock:
+        if _flaky_left > 0:
+            _flaky_left -= 1
+            return True
+        return False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -37,6 +52,19 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
 
     def _run(self):
+        if MODE == "stall":
+            time.sleep(60)
+            return
+        if MODE == "flaky" and flaky_fail():
+            payload = b"temporary failure\n"
+            self.send_response(503)
+            self.send_header("Retry-After", "0")
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
         u = urllib.parse.urlparse(self.path)
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
@@ -95,7 +123,8 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if len(sys.argv) not in (3, 4):
         sys.exit("usage: serve-http.py <git-project-root> <port> "
-                 "[length|chunked]")
-    if MODE not in ("length", "chunked", "v0"):
-        sys.exit("serve-http.py: mode must be length, chunked, or v0")
+                 "[length|chunked|v0|flaky|stall]")
+    if MODE not in ("length", "chunked", "v0", "flaky", "stall"):
+        sys.exit("serve-http.py: mode must be length, chunked, v0, flaky, "
+                 "or stall")
     ThreadingHTTPServer(("127.0.0.1", int(sys.argv[2])), Handler).serve_forever()

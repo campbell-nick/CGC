@@ -48,6 +48,7 @@ void oid_hex(const unsigned char oid[OID_RAW], char out[OID_HEX + 1]);
 void sha1_buf(const void *data, size_t len, unsigned char out[OID_RAW]);
 
 void put_be32(Buf *b, uint32_t v);
+void put_be64(Buf *b, uint64_t v);
 uint32_t get_be32(const unsigned char *p);
 uint64_t get_be64(const unsigned char *p);
 

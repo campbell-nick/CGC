@@ -30,6 +30,9 @@ ALL_LDLIBS   := $(LDLIBS) $(PKG_LIBS)
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 MANDIR ?= $(PREFIX)/share/man/man1
+BASHCOMPDIR ?= $(PREFIX)/share/bash-completion/completions
+ZSHCOMPDIR ?= $(PREFIX)/share/zsh/site-functions
+FISHCOMPDIR ?= $(PREFIX)/share/fish/vendor_completions.d
 
 SRC      := $(wildcard src/*.c)
 OBJ      := $(SRC:.c=.o)
@@ -57,6 +60,13 @@ $(PACKTEST): tests/packtest.c src/pack.o src/odb.o src/util.o
 check: $(UNIT) $(PACKTEST)
 	./$(UNIT)
 	./tests/pack.sh
+	bash -n completions/cgc.bash
+
+install-check: cgc
+	./tests/install.sh
+
+network: cgc
+	./tests/network.sh
 
 # Curated clang-tidy checks: focus on real correctness and safety findings and
 # exclude the insecureAPI style checks, which flag ordinary memcpy/memset use.
@@ -69,7 +79,7 @@ analyze:
 features: cgc
 	./tests/features.sh
 
-test: check cgc
+test: check install-check network cgc
 	./tests/smoke.sh
 	./tests/features.sh
 
@@ -79,7 +89,7 @@ dist:
 	tar -cf - --exclude='*.o' --exclude='tests/unit' \
 		--exclude='tests/packtest' --exclude='dist' \
 		Makefile VERSION README.md LICENSE CHANGELOG.md cgc.1 \
-		docs tests src .gitignore | tar -xf - -C "dist/$(DISTNAME)"
+		completions docs tests src .gitignore | tar -xf - -C "dist/$(DISTNAME)"
 	tar -czf "dist/$(DISTNAME).tar.gz" -C dist "$(DISTNAME)"
 	rm -rf "dist/$(DISTNAME)"
 	@echo "created dist/$(DISTNAME).tar.gz"
@@ -89,10 +99,19 @@ install: cgc
 	install -m 755 cgc "$(DESTDIR)$(BINDIR)/cgc"
 	install -d "$(DESTDIR)$(MANDIR)"
 	install -m 644 cgc.1 "$(DESTDIR)$(MANDIR)/cgc.1"
+	install -d "$(DESTDIR)$(BASHCOMPDIR)"
+	install -m 644 completions/cgc.bash "$(DESTDIR)$(BASHCOMPDIR)/cgc"
+	install -d "$(DESTDIR)$(ZSHCOMPDIR)"
+	install -m 644 completions/_cgc "$(DESTDIR)$(ZSHCOMPDIR)/_cgc"
+	install -d "$(DESTDIR)$(FISHCOMPDIR)"
+	install -m 644 completions/cgc.fish "$(DESTDIR)$(FISHCOMPDIR)/cgc.fish"
 
 uninstall:
 	rm -f "$(DESTDIR)$(BINDIR)/cgc"
 	rm -f "$(DESTDIR)$(MANDIR)/cgc.1"
+	rm -f "$(DESTDIR)$(BASHCOMPDIR)/cgc"
+	rm -f "$(DESTDIR)$(ZSHCOMPDIR)/_cgc"
+	rm -f "$(DESTDIR)$(FISHCOMPDIR)/cgc.fish"
 
 clean:
 	rm -f $(OBJ) cgc $(UNIT) $(PACKTEST)

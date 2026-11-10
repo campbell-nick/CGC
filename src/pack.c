@@ -1,8 +1,11 @@
 #include "pack.h"
 #include "odb.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <zlib.h>
 
 typedef struct {
     uint64_t offset;
@@ -102,9 +105,9 @@ static int read_varint(const unsigned char **pp, const unsigned char *end,
     return 0;
 }
 
-static int delta_apply(const unsigned char *base, size_t baselen,
-                       const unsigned char *delta, size_t deltalen,
-                       unsigned char **out, size_t *outlen)
+int pack_delta_apply(const unsigned char *base, size_t baselen,
+                     const unsigned char *delta, size_t deltalen,
+                     unsigned char **out, size_t *outlen)
 {
     const unsigned char *p = delta;
     const unsigned char *end = delta + deltalen;
@@ -161,6 +164,132 @@ static int delta_apply(const unsigned char *base, size_t baselen,
 fail:
     buf_free(&b);
     return -1;
+}
+
+typedef struct {
+    unsigned char oid[OID_RAW];
+    uint32_t crc;
+    uint64_t offset;
+} IdxEntry;
+
+static int idx_entry_cmp(const void *a, const void *b)
+{
+    return memcmp(((const IdxEntry *)a)->oid, ((const IdxEntry *)b)->oid,
+                  OID_RAW);
+}
+
+static uint32_t pack_crc32(const unsigned char *data, size_t len)
+{
+    uLong crc = crc32(0L, Z_NULL, 0);
+    while (len > 0) {
+        uInt chunk = len > UINT_MAX ? UINT_MAX : (uInt)len;
+        crc = crc32(crc, data, chunk);
+        data += chunk;
+        len -= chunk;
+    }
+    return (uint32_t)crc;
+}
+
+/* Write the received packfile and a v2 index next to it. Keeping the pack
+ * avoids creating one loose object (and one compressed copy) per object. */
+static int write_pack_and_index(const char *gitdir,
+                                const unsigned char *pack, size_t len,
+                                const PackEntry *entries, uint32_t count)
+{
+    if (len < 12 + OID_RAW)
+        return -1;
+
+    char *packdir = path_join(gitdir, "objects/pack");
+    if (mkdir_p(packdir, 0777) != 0) {
+        free(packdir);
+        return -1;
+    }
+
+    IdxEntry *sorted = xcalloc(count ? count : 1, sizeof(*sorted));
+    for (uint32_t i = 0; i < count; i++) {
+        size_t start = (size_t)entries[i].offset;
+        size_t end = i + 1 < count ? (size_t)entries[i + 1].offset
+                                   : len - OID_RAW;
+        if (start >= end || end > len - OID_RAW) {
+            free(sorted);
+            free(packdir);
+            return -1;
+        }
+        memcpy(sorted[i].oid, entries[i].oid, OID_RAW);
+        sorted[i].crc = pack_crc32(pack + start, end - start);
+        sorted[i].offset = entries[i].offset;
+    }
+    qsort(sorted, count, sizeof(*sorted), idx_entry_cmp);
+
+    Buf idx;
+    buf_init(&idx);
+    buf_append(&idx, "\377tOc", 4);
+    put_be32(&idx, 2);
+
+    uint32_t fanout[256];
+    memset(fanout, 0, sizeof(fanout));
+    for (uint32_t i = 0; i < count; i++)
+        fanout[sorted[i].oid[0]]++;
+    uint32_t sum = 0;
+    for (int i = 0; i < 256; i++) {
+        sum += fanout[i];
+        put_be32(&idx, sum);
+    }
+
+    for (uint32_t i = 0; i < count; i++)
+        buf_append(&idx, sorted[i].oid, OID_RAW);
+    for (uint32_t i = 0; i < count; i++)
+        put_be32(&idx, sorted[i].crc);
+
+    Buf large;
+    buf_init(&large);
+    int failed = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (sorted[i].offset < 0x80000000u) {
+            put_be32(&idx, (uint32_t)sorted[i].offset);
+        } else {
+            uint32_t n = (uint32_t)(large.len / 8);
+            if (n > 0x7fffffffu) {
+                failed = 1;
+                break;
+            }
+            put_be32(&idx, 0x80000000u | n);
+            put_be64(&large, sorted[i].offset);
+        }
+    }
+    if (!failed) {
+        buf_append(&idx, large.data, large.len);
+        buf_append(&idx, pack + len - OID_RAW, OID_RAW);
+        unsigned char digest[OID_RAW];
+        sha1_buf(idx.data, idx.len, digest);
+        buf_append(&idx, digest, OID_RAW);
+    }
+    buf_free(&large);
+
+    char hex[OID_HEX + 1];
+    oid_hex(pack + len - OID_RAW, hex);
+    Buf ppath;
+    buf_init(&ppath);
+    buf_appendf(&ppath, "%s/pack-%s.pack", packdir, hex);
+    Buf ipath;
+    buf_init(&ipath);
+    buf_appendf(&ipath, "%s/pack-%s.idx", packdir, hex);
+
+    int rc = -1;
+    if (!failed) {
+        rc = write_file_atomic((char *)ppath.data, pack, len, 0444);
+        if (rc == 0)
+            rc = write_file_atomic((char *)ipath.data, idx.data, idx.len, 0444);
+        if (rc != 0)
+            unlink((char *)ppath.data);
+    }
+
+    buf_free(&idx);
+    buf_free(&ppath);
+    buf_free(&ipath);
+    free(sorted);
+    free(packdir);
+    return rc;
 }
 
 int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir,
@@ -264,6 +393,7 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir,
 
     map_init(&map, count);
 
+    int thin = 0;
     size_t unresolved = count;
     uint32_t delta_done = 0;
     for (uint32_t pass = 0; unresolved > 0 && !cgc_interrupted && pass <= count; pass++) {
@@ -311,6 +441,7 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir,
                         base = basebuf.data;
                         baselen = basebuf.len;
                         have_basebuf = 1;
+                        thin = 1;
                     }
                 }
             } else {
@@ -322,8 +453,8 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir,
 
             unsigned char *result = NULL;
             size_t result_len = 0;
-            if (delta_apply(base, baselen, e->data, (size_t)e->size,
-                            &result, &result_len) != 0) {
+            if (pack_delta_apply(base, baselen, e->data, (size_t)e->size,
+                                 &result, &result_len) != 0) {
                 if (have_basebuf)
                     buf_free(&basebuf);
                 warn_cgc("corrupt delta in packfile");
@@ -359,11 +490,20 @@ int pack_unpack(const unsigned char *pack, size_t len, const char *gitdir,
         goto fail;
     }
 
-    for (uint32_t i = 0; i < count; i++) {
-        PackEntry *e = &entries[i];
-        if (odb_write(gitdir, e->type, e->data, (size_t)e->size, e->oid) != 0) {
-            warn_cgc("failed to write object");
+    if (!thin) {
+        if (write_pack_and_index(gitdir, pack, len, entries, count) != 0) {
+            warn_cgc("failed to write packfile");
             goto fail;
+        }
+        odb_cache_clear();
+    } else {
+        for (uint32_t i = 0; i < count; i++) {
+            PackEntry *e = &entries[i];
+            if (odb_write(gitdir, e->type, e->data,
+                          (size_t)e->size, e->oid) != 0) {
+                warn_cgc("failed to write object");
+                goto fail;
+            }
         }
     }
 

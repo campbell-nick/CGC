@@ -8,6 +8,9 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CGC="$ROOT/cgc"
 VERSION=$(cat "$ROOT/VERSION")
 WORK=$(mktemp -d)
+# Local test servers must bypass any proxy configured in the environment.
+export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="$NO_PROXY"
 BASE=$((12000 + RANDOM % 10000))
 PORT=$BASE
 PORT2=$((BASE + 1))

@@ -2,23 +2,29 @@
 #include "url.h"
 #include "util.h"
 
+#include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <openssl/err.h>
+#include <openssl/evp.h>
 #include <openssl/ssl.h>
 
 void http_response_free(HttpResponse *r)
 {
     buf_free(&r->body);
+    free(r->reason);
     free(r->content_type);
     free(r->location);
     memset(r, 0, sizeof(*r));
@@ -30,6 +36,241 @@ void http_set_token(const char *token)
 {
     free(g_http_token);
     g_http_token = token && *token ? xstrdup(token) : NULL;
+}
+
+#define HTTP_DEFAULT_TIMEOUT_SECONDS 60
+#define HTTP_DEFAULT_RETRIES 2
+#define HTTP_MAX_RETRY_DELAY_MS 4000
+
+static long env_long(const char *name, long def, long min, long max)
+{
+    const char *s = getenv(name);
+    if (!s || !*s)
+        return def;
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0' || v < min || v > max)
+        return def;
+    return v;
+}
+
+static int http_timeout_ms(void)
+{
+    long seconds = env_long("CGC_HTTP_TIMEOUT", HTTP_DEFAULT_TIMEOUT_SECONDS,
+                            1, 3600);
+    return (int)(seconds * 1000);
+}
+
+static int http_retries(void)
+{
+    return (int)env_long("CGC_HTTP_RETRIES", HTTP_DEFAULT_RETRIES, 0, 10);
+}
+
+typedef struct {
+    int enabled;
+    char *host;
+    int port;
+    char *auth; /* base64-encoded user:password, or NULL */
+} Proxy;
+
+static void proxy_free(Proxy *p)
+{
+    free(p->host);
+    free(p->auth);
+    memset(p, 0, sizeof(*p));
+}
+
+static int host_matches_no_proxy(const char *host, int port, const char *token)
+{
+    char *copy = xstrdup(token);
+    char *p = copy;
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    char *end = p + strlen(p);
+    while (end > p && isspace((unsigned char)end[-1]))
+        *--end = 0;
+
+    if (strcmp(p, "*") == 0) {
+        free(copy);
+        return 1;
+    }
+
+    int token_port = 0;
+    char *colon = strrchr(p, ':');
+    if (colon && colon[1]) {
+        char *num_end = NULL;
+        long v = strtol(colon + 1, &num_end, 10);
+        if (num_end && *num_end == '\0' && v > 0 && v <= 65535) {
+            token_port = (int)v;
+            *colon = 0;
+        }
+    }
+    if (token_port && token_port != port) {
+        free(copy);
+        return 0;
+    }
+
+    while (p[0] == '.' || (p[0] == '*' && p[1] == '.'))
+        p += p[0] == '*' ? 2 : 1;
+    if (!*p) {
+        free(copy);
+        return 0;
+    }
+
+    size_t n = strlen(p);
+    size_t hn = strlen(host);
+    int match = strcasecmp(host, p) == 0 ||
+                (hn > n && host[hn - n - 1] == '.' &&
+                 strcasecmp(host + hn - n, p) == 0);
+    free(copy);
+    return match;
+}
+
+static int no_proxy_matches(const char *host, int port)
+{
+    const char *env = getenv("no_proxy");
+    if (!env || !*env)
+        env = getenv("NO_PROXY");
+    if (!env || !*env)
+        return 0;
+
+    char *copy = xstrdup(env);
+    char *save = NULL;
+    int match = 0;
+    for (char *tok = strtok_r(copy, ",", &save); tok;
+         tok = strtok_r(NULL, ",", &save)) {
+        if (host_matches_no_proxy(host, port, tok)) {
+            match = 1;
+            break;
+        }
+    }
+    free(copy);
+    return match;
+}
+
+static int proxy_parse(const char *value, Proxy *p)
+{
+    const char *s = value;
+    const char *sep = strstr(s, "://");
+    if (sep) {
+        char *scheme = xstrndup(s, (size_t)(sep - s));
+        int ok = strcasecmp(scheme, "http") == 0;
+        free(scheme);
+        if (!ok) {
+            warn_cgc("unsupported proxy scheme in '%s' "
+                     "(only http proxies are supported)", value);
+            return -1;
+        }
+        s = sep + 3;
+    }
+
+    const char *end = s + strlen(s);
+    const char *slash = strpbrk(s, "/?#");
+    if (slash)
+        end = slash;
+
+    const char *at = memchr(s, '@', (size_t)(end - s));
+    char *auth = at ? xstrndup(s, (size_t)(at - s)) : NULL;
+    if (at)
+        s = at + 1;
+
+    char *host = NULL;
+    int port = 80;
+    if (s < end && *s == '[') {
+        const char *close = memchr(s, ']', (size_t)(end - s));
+        if (!close) {
+            free(auth);
+            return -1;
+        }
+        host = xstrndup(s + 1, (size_t)(close - s - 1));
+        if (close + 1 < end && close[1] == ':') {
+            char *num_end = NULL;
+            long v = strtol(close + 2, &num_end, 10);
+            if (num_end != close + 2 && num_end == end && v > 0 && v <= 65535)
+                port = (int)v;
+            else {
+                free(host);
+                free(auth);
+                return -1;
+            }
+        }
+    } else {
+        const char *colon = memchr(s, ':', (size_t)(end - s));
+        const char *host_end = colon ? colon : end;
+        if (host_end == s) {
+            free(auth);
+            return -1;
+        }
+        host = xstrndup(s, (size_t)(host_end - s));
+        if (colon) {
+            char *num_end = NULL;
+            long v = strtol(colon + 1, &num_end, 10);
+            if (num_end != colon + 1 && num_end == end && v > 0 && v <= 65535)
+                port = (int)v;
+            else {
+                free(host);
+                free(auth);
+                return -1;
+            }
+        }
+    }
+
+    if (!*host) {
+        free(host);
+        free(auth);
+        return -1;
+    }
+
+    p->host = host;
+    p->port = port;
+    if (auth && *auth) {
+        size_t n = 4 * ((strlen(auth) + 2) / 3) + 1;
+        char *b64 = xmalloc(n);
+        int encoded = EVP_EncodeBlock((unsigned char *)b64,
+                                      (const unsigned char *)auth,
+                                      (int)strlen(auth));
+        b64[encoded] = '\0';
+        p->auth = b64;
+    }
+    free(auth);
+    p->enabled = 1;
+    return 0;
+}
+
+static int proxy_for(const Url *u, Proxy *p)
+{
+    memset(p, 0, sizeof(*p));
+
+    const char *env = NULL;
+    if (strcmp(u->scheme, "https") == 0) {
+        env = getenv("https_proxy");
+        if (!env || !*env)
+            env = getenv("HTTPS_PROXY");
+    } else {
+        env = getenv("http_proxy");
+        if (!env || !*env)
+            env = getenv("HTTP_PROXY");
+    }
+    if (!env || !*env) {
+        env = getenv("all_proxy");
+        if (!env || !*env)
+            env = getenv("ALL_PROXY");
+    }
+    if (!env || !*env || no_proxy_matches(u->host, u->port))
+        return 0;
+
+    return proxy_parse(env, p) == 0 ? 1 : 0;
+}
+
+static void set_socket_timeouts(int fd)
+{
+    int ms = http_timeout_ms();
+    struct timeval tv;
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
 static int tcp_connect(const char *host, int port)
@@ -50,18 +291,61 @@ static int tcp_connect(const char *host, int port)
     }
 
     int fd = -1;
+    int timeout = http_timeout_ms();
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0)
             continue;
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0)
+
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+            close(fd);
+            fd = -1;
+            continue;
+        }
+
+        int connected = connect(fd, ai->ai_addr, ai->ai_addrlen) == 0;
+        if (!connected && errno == EINPROGRESS) {
+            struct pollfd pfd;
+            pfd.fd = fd;
+            pfd.events = POLLOUT;
+            pfd.revents = 0;
+            int pr;
+            do {
+                pr = poll(&pfd, 1, timeout);
+            } while (pr < 0 && errno == EINTR && !cgc_interrupted);
+
+            if (pr > 0) {
+                int err = 0;
+                socklen_t elen = sizeof(err);
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen) == 0 &&
+                    err == 0) {
+                    connected = 1;
+                } else {
+                    errno = err ? err : ECONNREFUSED;
+                }
+            } else if (pr == 0) {
+                errno = ETIMEDOUT;
+            }
+        }
+
+        if (connected) {
+            fcntl(fd, F_SETFL, flags);
+            set_socket_timeouts(fd);
             break;
+        }
         close(fd);
         fd = -1;
+        if (cgc_interrupted)
+            break;
     }
     freeaddrinfo(res);
-    if (fd < 0)
-        warn_cgc("cannot connect to %s:%d: %s", host, port, strerror(errno));
+    if (fd < 0) {
+        if (errno == ETIMEDOUT)
+            warn_cgc("timed out connecting to %s:%d", host, port);
+        else
+            warn_cgc("cannot connect to %s:%d: %s", host, port, strerror(errno));
+    }
     return fd;
 }
 
@@ -71,16 +355,12 @@ typedef struct {
     SSL *ssl;
 } Conn;
 
-static int conn_open(Conn *c, const Url *u)
+static ssize_t conn_read(Conn *c, void *buf, size_t len);
+static int conn_write_all(Conn *c, const void *data, size_t len);
+static int proxy_connect(Conn *c, const Url *u, const Proxy *p);
+
+static int tls_start(Conn *c, const Url *u)
 {
-    memset(c, 0, sizeof(*c));
-    c->fd = tcp_connect(u->host, u->port);
-    if (c->fd < 0)
-        return -1;
-
-    if (strcmp(u->scheme, "https") != 0)
-        return 0;
-
     c->ctx = SSL_CTX_new(TLS_client_method());
     if (!c->ctx) {
         warn_cgc("cannot create TLS context");
@@ -118,6 +398,30 @@ static int conn_open(Conn *c, const Url *u)
     return 0;
 }
 
+static int conn_open(Conn *c, const Url *u, const Proxy *p)
+{
+    memset(c, 0, sizeof(*c));
+
+    if (p->enabled) {
+        c->fd = tcp_connect(p->host, p->port);
+        if (c->fd < 0)
+            return -1;
+        if (strcmp(u->scheme, "https") == 0) {
+            if (proxy_connect(c, u, p) != 0)
+                return -1;
+            return tls_start(c, u);
+        }
+        return 0;
+    }
+
+    c->fd = tcp_connect(u->host, u->port);
+    if (c->fd < 0)
+        return -1;
+    if (strcmp(u->scheme, "https") != 0)
+        return 0;
+    return tls_start(c, u);
+}
+
 static void conn_close(Conn *c)
 {
     if (c->ssl) {
@@ -143,6 +447,10 @@ static ssize_t conn_read(Conn *c, void *buf, size_t len)
             return 0;
         if (err == SSL_ERROR_SYSCALL && errno == 0)
             return 0;
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE ||
+            (err == SSL_ERROR_SYSCALL &&
+             (errno == EAGAIN || errno == EWOULDBLOCK)))
+            errno = ETIMEDOUT;
         if (cgc_interrupted)
             return -1;
         return -1;
@@ -154,6 +462,8 @@ static ssize_t conn_read(Conn *c, void *buf, size_t len)
                 return -1;
             continue;
         }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            errno = ETIMEDOUT;
         return n;
     }
 }
@@ -165,8 +475,14 @@ static int conn_write_all(Conn *c, const void *data, size_t len)
         int n;
         if (c->ssl) {
             n = SSL_write(c->ssl, p, (int)(len > INT_MAX ? INT_MAX : len));
-            if (n <= 0)
+            if (n <= 0) {
+                int err = SSL_get_error(c->ssl, n);
+                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE ||
+                    (err == SSL_ERROR_SYSCALL &&
+                     (errno == EAGAIN || errno == EWOULDBLOCK)))
+                    errno = ETIMEDOUT;
                 return -1;
+            }
         } else {
             ssize_t w = write(c->fd, p, len);
             if (w < 0) {
@@ -175,12 +491,64 @@ static int conn_write_all(Conn *c, const void *data, size_t len)
                         return -1;
                     continue;
                 }
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    errno = ETIMEDOUT;
                 return -1;
             }
             n = (int)w;
         }
         p += n;
         len -= (size_t)n;
+    }
+    return 0;
+}
+
+static int proxy_connect(Conn *c, const Url *u, const Proxy *p)
+{
+    Buf req;
+    buf_init(&req);
+    buf_appendf(&req, "CONNECT %s:%d HTTP/1.1\r\n", u->host, u->port);
+    buf_appendf(&req, "Host: %s:%d\r\n", u->host, u->port);
+    if (p->auth)
+        buf_appendf(&req, "Proxy-Authorization: Basic %s\r\n", p->auth);
+    buf_append(&req, "\r\n", 2);
+
+    int rc = conn_write_all(c, req.data, req.len);
+    buf_free(&req);
+    if (rc != 0) {
+        warn_cgc("failed to send CONNECT to proxy %s:%d", p->host, p->port);
+        return -1;
+    }
+
+    char header[8192];
+    size_t len = 0;
+    while (len < sizeof(header) - 1) {
+        ssize_t n = conn_read(c, header + len, 1);
+        if (n <= 0) {
+            warn_cgc("proxy %s:%d closed the connection during CONNECT",
+                     p->host, p->port);
+            return -1;
+        }
+        len++;
+        header[len] = 0;
+        if (len >= 4 && memcmp(header + len - 4, "\r\n\r\n", 4) == 0)
+            break;
+    }
+    if (len < 4 || memcmp(header + len - 4, "\r\n\r\n", 4) != 0) {
+        warn_cgc("proxy response is too large");
+        return -1;
+    }
+
+    char *sp = strchr(header, ' ');
+    int status = 0;
+    if (!sp || sscanf(sp + 1, "%d", &status) != 1) {
+        warn_cgc("malformed response from proxy %s:%d", p->host, p->port);
+        return -1;
+    }
+    if (status != 200) {
+        warn_cgc("proxy CONNECT to %s:%d failed with HTTP %d",
+                 u->host, u->port, status);
+        return -1;
     }
     return 0;
 }
@@ -229,11 +597,21 @@ static int append_sink(void *ud, const void *data, size_t len)
     return 0;
 }
 
-static int discard_sink(void *ud, const void *data, size_t len)
+typedef struct {
+    Buf *buf;
+    size_t limit;
+} Capture;
+
+static int capture_sink(void *ud, const void *data, size_t len)
 {
-    (void)ud;
-    (void)data;
-    (void)len;
+    Capture *c = ud;
+    if (c->buf->len >= c->limit)
+        return 0;
+    size_t room = c->limit - c->buf->len;
+    if (len > room)
+        len = room;
+    if (len)
+        buf_append(c->buf, data, len);
     return 0;
 }
 
@@ -410,9 +788,13 @@ static int request_once(const char *method, const char *url,
         return -1;
     }
 
+    Proxy proxy;
+    proxy_for(&u, &proxy);
+
     Conn c;
-    if (conn_open(&c, &u) != 0) {
+    if (conn_open(&c, &u, &proxy) != 0) {
         conn_close(&c);
+        proxy_free(&proxy);
         url_free(&u);
         return -1;
     }
@@ -420,7 +802,14 @@ static int request_once(const char *method, const char *url,
     int default_port = strcmp(u.scheme, "https") == 0 ? 443 : 80;
     Buf req;
     buf_init(&req);
-    buf_appendf(&req, "%s %s HTTP/1.1\r\n", method, u.path);
+    if (proxy.enabled && strcmp(u.scheme, "http") == 0) {
+        buf_appendf(&req, "%s %s://%s", method, u.scheme, u.host);
+        if (u.port != default_port)
+            buf_appendf(&req, ":%d", u.port);
+        buf_appendf(&req, "%s HTTP/1.1\r\n", u.path);
+    } else {
+        buf_appendf(&req, "%s %s HTTP/1.1\r\n", method, u.path);
+    }
     if (u.port == default_port)
         buf_appendf(&req, "Host: %s\r\n", u.host);
     else
@@ -432,6 +821,8 @@ static int request_once(const char *method, const char *url,
     if (g_http_token) {
         buf_appendf(&req, "Authorization: Bearer %s\r\n", g_http_token);
     }
+    if (proxy.enabled && strcmp(u.scheme, "http") == 0 && proxy.auth)
+        buf_appendf(&req, "Proxy-Authorization: Basic %s\r\n", proxy.auth);
     if (extra_headers) {
         buf_append(&req, extra_headers, strlen(extra_headers));
         if (req.len >= 2 && !(req.data[req.len - 2] == '\r' && req.data[req.len - 1] == '\n'))
@@ -444,9 +835,13 @@ static int request_once(const char *method, const char *url,
     buf_append(&req, "\r\n", 2);
     if (bodylen)
         buf_append(&req, body, bodylen);
+    proxy_free(&proxy);
 
     if (conn_write_all(&c, req.data, req.len) != 0) {
-        warn_cgc("failed to send request to %s", u.host);
+        if (errno == ETIMEDOUT)
+            warn_cgc("timed out sending request to %s", u.host);
+        else
+            warn_cgc("failed to send request to %s", u.host);
         buf_free(&req);
         conn_close(&c);
         url_free(&u);
@@ -462,6 +857,7 @@ static int request_once(const char *method, const char *url,
     int status = 0;
     long long content_length = -1;
     int chunked = 0;
+    char *reason_resp = NULL;
     char *content_type_resp = NULL;
     char *location = NULL;
     int failed = 0;
@@ -472,11 +868,18 @@ static int request_once(const char *method, const char *url,
     dec.sink = append_sink;
     dec.ud = &resp->body;
 
+    Capture capture;
+    capture.buf = &resp->body;
+    capture.limit = 4096;
+
     for (;;) {
         buf_reserve(&raw, 16384);
         ssize_t n = conn_read(&c, raw.data + raw.len, raw.cap - raw.len - 1);
         if (n < 0) {
-            warn_cgc("error reading response from %s", u.host);
+            if (errno == ETIMEDOUT)
+                warn_cgc("timed out waiting for a response from %s", u.host);
+            else
+                warn_cgc("error reading response from %s", u.host);
             failed = 1;
             break;
         }
@@ -498,13 +901,19 @@ static int request_once(const char *method, const char *url,
 
             char *headers = xstrndup((char *)raw.data, hdr_end);
             char *line_end = strstr(headers, "\r\n");
-            if (!line_end || sscanf(headers, "HTTP/%*d.%*d %d", &status) != 1) {
+            char *sp1 = line_end ? strchr(headers, ' ') : NULL;
+            if (!line_end || !sp1 ||
+                sscanf(sp1 + 1, "%d", &status) != 1 ||
+                status < 100 || status > 599) {
                 warn_cgc("malformed HTTP response from %s", u.host);
                 free(headers);
                 failed = 1;
                 break;
             }
             *line_end = 0;
+            char *sp2 = strchr(sp1 + 1, ' ');
+            if (sp2 && sp2[1])
+                reason_resp = xstrdup(sp2 + 1);
             content_type_resp = header_value(line_end + 2, "Content-Type");
             char *cl = header_value(line_end + 2, "Content-Length");
             char *te = header_value(line_end + 2, "Transfer-Encoding");
@@ -532,9 +941,13 @@ static int request_once(const char *method, const char *url,
                     dec.sink = on_body;
                     dec.ud = ud;
                 } else {
-                    dec.sink = discard_sink;
-                    dec.ud = NULL;
+                    dec.sink = capture_sink;
+                    dec.ud = &capture;
                 }
+            } else if (status != 200) {
+                /* Do not buffer a large HTML error page just to print a hint. */
+                dec.sink = capture_sink;
+                dec.ud = &capture;
             }
         }
 
@@ -569,12 +982,14 @@ static int request_once(const char *method, const char *url,
 
     if (failed) {
         buf_free(&resp->body);
+        free(reason_resp);
         free(content_type_resp);
         free(location);
         return -1;
     }
 
     resp->status = status;
+    resp->reason = reason_resp;
     resp->content_type = content_type_resp;
     resp->location = location;
     return 0;
@@ -645,14 +1060,105 @@ out:
     return rc;
 }
 
+static const char *status_hint(int status)
+{
+    switch (status) {
+    case 401:
+        return "authentication required; pass a token with --token or CGC_TOKEN";
+    case 403:
+        return "access denied; check that the token can read this repository";
+    case 404:
+        return "repository not found; check the URL and that it is not private";
+    case 407:
+        return "proxy authentication required; add credentials to the proxy URL";
+    case 429:
+        return "rate limited by the server; try again later";
+    case 500:
+    case 502:
+    case 503:
+    case 504:
+        return "the server had a temporary problem; try again later";
+    default:
+        return NULL;
+    }
+}
+
+static void warn_error_body(const HttpResponse *r)
+{
+    if (!r->body.len)
+        return;
+    if (r->content_type && contains_ci(r->content_type, "html"))
+        return;
+
+    size_t n = r->body.len < 200 ? r->body.len : 200;
+    char buf[201];
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = r->body.data[i];
+        if (c == '\r' || c == '\n' || c == '\t') {
+            if (w > 0 && buf[w - 1] != ' ')
+                buf[w++] = ' ';
+        } else if ((c >= 0x20 && c < 0x7f) || c >= 0x80) {
+            buf[w++] = (char)c;
+        }
+    }
+    while (w > 0 && buf[w - 1] == ' ')
+        w--;
+    buf[w] = 0;
+    if (w)
+        warn_cgc("server response: %s", buf);
+}
+
+void http_warn_status(const HttpResponse *r, const char *action)
+{
+    if (r->reason && *r->reason)
+        warn_cgc("remote returned HTTP %d %s while %s",
+                 r->status, r->reason, action);
+    else
+        warn_cgc("remote returned HTTP %d while %s", r->status, action);
+
+    const char *hint = status_hint(r->status);
+    if (hint)
+        warn_cgc("%s", hint);
+    warn_error_body(r);
+}
+
+static void retry_sleep(int attempt)
+{
+    long ms = 250L << (attempt < 4 ? attempt : 4);
+    if (ms > HTTP_MAX_RETRY_DELAY_MS)
+        ms = HTTP_MAX_RETRY_DELAY_MS;
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR && !cgc_interrupted)
+        ;
+}
+
 int http_request(const char *method, const char *url,
                  const char *content_type,
                  const void *body, size_t bodylen,
                  const char *extra_headers,
                  HttpResponse *resp)
 {
-    return do_request(method, url, content_type, body, bodylen,
-                      extra_headers, NULL, NULL, resp);
+    int retryable = strcmp(method, "GET") == 0 || strcmp(method, "HEAD") == 0;
+    int retries = retryable ? http_retries() : 0;
+
+    for (int attempt = 0;; attempt++) {
+        int rc = do_request(method, url, content_type, body, bodylen,
+                            extra_headers, NULL, NULL, resp);
+        if (rc == 0) {
+            int transient = resp->status == 408 || resp->status == 429 ||
+                            resp->status == 500 || resp->status == 502 ||
+                            resp->status == 503 || resp->status == 504;
+            if (!transient || attempt >= retries)
+                return 0;
+            http_response_free(resp);
+        } else if (attempt >= retries || cgc_interrupted) {
+            return -1;
+        }
+        retry_sleep(attempt);
+    }
 }
 
 int http_request_stream(const char *method, const char *url,

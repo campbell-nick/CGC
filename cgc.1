@@ -388,6 +388,33 @@ are not given.
 Fallback bearer token, used when
 .B CGC_TOKEN
 is not set.
+.TP
+.B CGC_HTTP_TIMEOUT
+Network timeout in seconds for connecting, reading, and writing. Defaults to
+60.
+.TP
+.B CGC_HTTP_RETRIES
+Number of retries for idempotent
+.B GET
+and
+.B HEAD
+requests after a transient failure (408, 429, 500, 502, 503, or 504).
+Defaults to 2.
+.TP
+.B http_proxy ", " https_proxy ", " all_proxy
+Proxy URL for plain HTTP, HTTPS, or all requests. The uppercase names are
+also accepted. Credentials may be included as
+.IR user:password@host:port .
+HTTPS requests use the
+.B CONNECT
+method through the proxy.
+.TP
+.B NO_PROXY
+Comma-separated hosts or host:port entries that bypass the proxy.
+.B NO_PROXY
+and
+.B no_proxy
+are both accepted.
 .SH "EXIT STATUS"
 .TP
 .B 0

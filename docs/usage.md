@@ -158,6 +158,31 @@ deleted until a checkout is performed. `--origin` is validated and used
 consistently in config sections, branch upstream settings, and remote-tracking
 refs.
 
+## Network
+
+HTTP requests have connect, read, and write timeouts, defaulting to 60 seconds.
+Set `CGC_HTTP_TIMEOUT` (in seconds) to change this. Idempotent `GET` and `HEAD`
+requests are retried up to `CGC_HTTP_RETRIES` times (default 2) with backoff
+after transient failures (408, 429, 500, 502, 503, and 504).
+
+`cgc` honors `http_proxy`/`HTTP_PROXY`, `https_proxy`/`HTTPS_PROXY`, and
+`all_proxy`/`ALL_PROXY`. Proxy URLs may include credentials
+(`http://user:password@proxy:8080`); HTTPS requests are tunnelled through the
+proxy with `CONNECT`. `NO_PROXY`/`no_proxy` lists hosts or `host:port` entries
+that bypass the proxy.
+
+When a server returns an error, `cgc` reports the status code and reason
+phrase, a short hint for common cases (401, 403, 404, 407, 429, and 5xx), and
+the beginning of a text error body from the server when it is not HTML.
+
+## Object storage
+
+Self-contained packs received over HTTP are kept as
+`objects/pack/pack-<sha>.pack` with a v2 `.idx`, and objects are read directly
+from them instead of being expanded into loose objects. Thin packs, whose delta
+bases are not included in the transfer, are resolved against existing objects
+and written as loose objects instead.
+
 ## Output
 
 Status is written to stderr in the same style as `git clone`: `Cloning into

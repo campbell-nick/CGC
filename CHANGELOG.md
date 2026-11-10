@@ -81,9 +81,31 @@ All notable changes to this project are documented here. The format follows
   `make features` and run by `make test`, covering CLI validation, clone
   modes, fetch/pull semantics, refspecs, multiple remotes, mirrors, local
   transport, and protocol v0.
+- HTTP connect, read, and write timeouts, configurable with
+  `CGC_HTTP_TIMEOUT` (seconds, default 60), so a stalled server cannot hang a
+  clone or fetch forever.
+- Automatic retries for idempotent `GET` and `HEAD` requests on transient
+  failures (408, 429, 500, 502, 503, 504), configurable with
+  `CGC_HTTP_RETRIES` (default 2).
+- HTTP and HTTPS proxy support through `http_proxy`/`HTTP_PROXY`,
+  `https_proxy`/`HTTPS_PROXY`, `all_proxy`/`ALL_PROXY`, and `NO_PROXY`/
+  `no_proxy`, including `CONNECT` tunnelling and proxy authentication from
+  `user:password@host:port` proxy URLs.
+- HTTP errors now include the status reason phrase, a short hint for common
+  codes (401, 403, 404, 407, 429, and 5xx), and the start of a text error body
+  from the server.
+- Bash, zsh, and fish completions under `completions/`, installed by
+  `make install` into the standard completion directories.
+- End-to-end coverage for timeouts, retries, proxy use and bypass, and
+  `make install`/`uninstall` staging.
 
 ### Changed
 
+- Self-contained received packs are retained as `objects/pack/pack-<sha>.pack`
+  plus a v2 `.idx`, instead of expanding every object into a loose object. The
+  object reader now reads loose objects and packfiles. Thin packs, whose delta
+  bases are not in the pack, still fall back to loose objects.
+- `make test` now also runs the install and network test suites.
 - `--help` output is more compact: related options share a line, repository
   shorthands are shown in columns, and the clone help fits on one screen.
 - Pull is fast-forward-only and preserves unchanged files. It refuses to

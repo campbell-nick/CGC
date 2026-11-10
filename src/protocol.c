@@ -203,7 +203,7 @@ static int discover(const char *url, int *unborn_ok, RemoteRefs *out,
         return -1;
 
     if (resp.status != 200) {
-        warn_cgc("remote returned HTTP %d while discovering refs", resp.status);
+        http_warn_status(&resp, "discovering refs");
         http_response_free(&resp);
         return -1;
     }
@@ -434,7 +434,7 @@ int protocol_ls_refs(const char *url, int all_refs, RemoteRefs *out)
     buf_free(&req);
 
     if (resp.status != 200) {
-        warn_cgc("remote returned HTTP %d while listing refs", resp.status);
+        http_warn_status(&resp, "listing refs");
         http_response_free(&resp);
         return -1;
     }
@@ -1005,7 +1005,7 @@ static int protocol_fetch_v0(const char *url, const RemoteRefs *refs,
     progress_remote_end();
 
     if (resp.status != 200) {
-        warn_cgc("remote returned HTTP %d while fetching", resp.status);
+        http_warn_status(&resp, "fetching");
         http_response_free(&resp);
         buf_free(&demux.pack);
         buf_free(&demux.pending);
@@ -1126,7 +1126,7 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
     progress_remote_end();
 
     if (resp.status != 200) {
-        warn_cgc("remote returned HTTP %d while fetching", resp.status);
+        http_warn_status(&resp, "fetching");
         http_response_free(&resp);
         buf_free(&demux.pack);
         buf_free(&demux.pending);

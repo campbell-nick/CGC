@@ -23,4 +23,7 @@ int odb_write(const char *gitdir, int type, const void *data, size_t len,
 int odb_read(const char *gitdir, const unsigned char oid[OID_RAW],
              int *type, Buf *out);
 
+/* Drop cached pack indexes, for example after a new pack is written. */
+void odb_cache_clear(void);
+
 #endif

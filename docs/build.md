@@ -38,23 +38,38 @@ make install DESTDIR=/tmp/pkgroot
 make uninstall
 ```
 
-After installing, `man cgc` shows the manual page.
+`make install` also installs bash, zsh, and fish completions under
+`$(PREFIX)/share/bash-completion/completions`,
+`$(PREFIX)/share/zsh/site-functions`, and
+`$(PREFIX)/share/fish/vendor_completions.d`. Override `BASHCOMPDIR`,
+`ZSHCOMPDIR`, or `FISHCOMPDIR` for a different layout. After installing,
+`man cgc` shows the manual page.
 
 ## Tests
 
 ```sh
-make check    # unit tests and pack round-trip tests (no network)
-make features # comprehensive end-to-end feature matrix
-make test     # everything in check, plus smoke and feature tests
+make check         # unit, pack round-trip, and completion syntax (no network)
+make install-check # staged install and uninstall
+make network       # timeouts, retries, proxy use and bypass (local servers)
+make features      # comprehensive end-to-end feature matrix
+make test          # all of the above, plus smoke and feature tests
 ```
 
 `make check` runs:
 
 - `tests/unit` — URL parsing and every shorthand, pkt-line framing, SHA-1
   vectors, zlib round-trips, path helpers, and ref-name validation.
-- `tests/pack.sh` — builds packfiles with Git (including `ofs-delta` and
-  `ref-delta`), unpacks them with `cgc`'s pack reader, and compares the object
-  database with the source repository.
+- `tests/pack.sh` — builds packfiles with Git (including `ofs-delta`,
+  `ref-delta`, and thin packs), unpacks them with `cgc`'s pack reader, and
+  compares the object database with the source repository. Self-contained
+  packs must be retained as a pack plus index; thin packs must fall back to
+  loose objects.
+- A syntax check of the bash completion.
+
+`tests/network.sh` starts local HTTP servers and proxies. It verifies that a
+stalled server times out, that transient 503 responses are retried, that the
+error report includes the status, hint, and server message, and that HTTP
+proxies, proxy credentials, `ALL_PROXY`, and `NO_PROXY` work.
 
 `make test` additionally runs `tests/smoke.sh`, which generates a repository
 with history, deltas, branches, annotated and lightweight tags, a symlink, an

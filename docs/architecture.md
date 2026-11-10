@@ -27,8 +27,12 @@
    no sideband capability is negotiated.
 6. **Unpack** (`pack.c`, `odb.c`) — verifies the pack checksum, inflates every
    entry, resolves `OFS_DELTA` and `REF_DELTA` chains with an oid hash map and
-   binary-searched offsets, hashes each object and writes it as a loose,
-   read-only object.
+   binary-searched offsets, and hashes each object. A self-contained pack is
+   written back as `objects/pack/pack-<sha>.pack` plus a v2 `.idx`; a thin pack
+   (whose delta bases are not in the transfer) is resolved against existing
+   objects and falls back to loose, read-only objects. `odb.c` reads loose
+   objects first, then binary-searches cached pack indexes and applies deltas
+   on demand.
 7. **Refs and config** (`repo.c`) — writes local branches, tags,
    `refs/remotes/<remote>/*`, `<remote>/HEAD`, `HEAD`, and the named remote
    (default `origin`). A bare clone writes refs and objects directly into the
@@ -55,7 +59,8 @@ For local paths and `file://` URLs, `url.c` resolves an absolute path and
    `refs/notes`. The result uses the same `RemoteRefs` structure as protocol
    v2, so clone and update logic is shared.
 3. **Copy objects** — copy loose objects that are missing from the destination,
-   then unpack every source `.pack` file into destination loose objects. The
+   then read every source `.pack` file and re-pack its contents into a
+   destination pack (or loose objects when the source pack is thin). The
    source `shallow` file is copied when present.
 4. **Annotated tags** — local ref listing has no peeled-commit advertisement, so
    after objects are copied a tag selected with `--branch` is peeled to its
@@ -110,14 +115,15 @@ different flow (`update.c`):
 src/
   main.c       CLI, shorthand parsing, clone and subcommand dispatch
   url.c        URL parsing, local-path detection, shorthand resolution
-  http.c       HTTP/1.1 over TCP + OpenSSL, chunked bodies, redirects
+  http.c       HTTP/1.1 over TCP + OpenSSL, chunked bodies, redirects,
+               timeouts, retries, and proxies
   local.c      local repository discovery, refs, object and pack copying
   pktline.c    Git pkt-line framing
   protocol.c   protocol v2 and v0 fallback: discovery, refs, fetch, sideband
   refspec.c    fetch refspec parsing, mapping, negative and wildcard refspecs
   progress.c   Git-style status output and progress meters
-  pack.c       packfile parsing, delta resolution
-  odb.c        loose object read/write and hashing
+  pack.c       packfile parsing, delta resolution, pack and .idx writing
+  odb.c        loose object read/write, pack index cache and pack reads
   repo.c       .git skeleton, config, refs, HEAD, local object discovery
   checkout.c   tree walking, working tree, DIRC index, incremental updates
   update.c     fetch, fast-forward pull, and worktree orchestration

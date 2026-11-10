@@ -7,12 +7,17 @@
 
 typedef struct {
     int status;
+    char *reason;
     Buf body;
     char *content_type;
     char *location;
 } HttpResponse;
 
 void http_response_free(HttpResponse *r);
+
+/* Print a diagnostic for a non-200 response, including the server's reason
+ * phrase, a short hint for common status codes, and a text error body. */
+void http_warn_status(const HttpResponse *r, const char *action);
 
 /* Set a bearer token used for all subsequent requests (or NULL to clear). */
 void http_set_token(const char *token);

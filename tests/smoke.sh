@@ -6,6 +6,9 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 WORK=$(mktemp -d)
+# Local test servers must bypass any proxy configured in the environment.
+export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="$NO_PROXY"
 PORT=${PORT:-$((8000 + RANDOM % 500))}
 PORT2=$((PORT + 500))
 PORT3=$((PORT + 1000))

@@ -222,6 +222,12 @@ void put_be32(Buf *b, uint32_t v)
     buf_append(b, p, 4);
 }
 
+void put_be64(Buf *b, uint64_t v)
+{
+    put_be32(b, (uint32_t)(v >> 32));
+    put_be32(b, (uint32_t)v);
+}
+
 uint32_t get_be32(const unsigned char *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
