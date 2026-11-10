@@ -84,12 +84,20 @@ Expands to
 Fetch missing objects and update
 .B refs/remotes/origin/*
 and tags. Local branches and the working tree are left untouched.
+.B .git/FETCH_HEAD
+records what was fetched.
 .TP
 .B pull
 Fetch, then fast-forward the current branch and update the working tree and
 index. Refuses to run when the remote branch is not a descendant of the local
 branch, when an affected file has local modifications, or when an untracked
-path would be overwritten.
+path would be overwritten. Staged changes on paths the update does not touch
+are preserved; a staged change to an affected path is refused unless it already
+matches the new tree.
+.B .git/ORIG_HEAD
+records the previous
+.B HEAD
+before it moves.
 .TP
 .B update
 Alias for
@@ -108,6 +116,20 @@ is unborn or detached. From a detached
 .B pull
 switches to the branch, fast-forwarding it when possible, keeping the local tip
 when it is ahead, and refusing when local and remote have diverged.
+.PP
+Tags are fetched by default. An existing local tag is never overwritten when
+the remote tag points at a different object; use
+.B \-\-force
+to allow that.
+.B \-\-no\-tags
+skips tags entirely.
+.B \-\-prune
+deletes remote-tracking refs for branches deleted upstream, including entries
+in
+.BR packed\-refs ;
+it is skipped when
+.B \-\-branch
+limits the fetch.
 .SH OPTIONS
 .TP
 .B \-\-host \fIhost\fR
@@ -142,6 +164,29 @@ When fetching or pulling, limit the operation to
 .I name
 (tags are still fetched by
 .BR fetch ).
+.TP
+.B \-\-tags
+Fetch and update all advertised tags. This is the default. Fetch, pull, and
+update only.
+.TP
+.B \-\-no\-tags
+Do not fetch or update tags. Fetch, pull, and update only.
+.TP
+.B \-\-force
+Overwrite a local tag that points at a different object than the remote tag.
+Without this option such a fetch is refused before any refs are written. This
+does not make
+.B pull
+accept a non-fast-forward update. Fetch, pull, and update only.
+.TP
+.B \-\-prune
+Delete remote-tracking refs under
+.B refs/remotes/origin
+that the remote no longer advertises, including entries in
+.BR packed\-refs .
+Skipped when
+.B \-\-branch
+limits the fetch. Fetch, pull, and update only.
 .TP
 .B \-\-depth \fIn\fR
 Create a shallow clone with history truncated to
@@ -181,6 +226,8 @@ cgc \-\-host git.example.com team/repo
 CGC_DEFAULT_HOST=git.example.com cgc team/repo
 cd repo && cgc fetch
 cd repo && cgc pull
+cd repo && cgc fetch \-\-prune
+cd repo && cgc fetch \-\-no\-tags
 cgc pull \-\-branch main /path/to/repo
 .fi
 .SH OUTPUT
@@ -251,8 +298,22 @@ This prevents a malicious repository from writing outside the target directory.
 .B pull
 checks the working tree before changing it: an affected file must still match
 the old commit, and an added path must not already exist as an untracked file.
-If either check fails, nothing is written. Pull never creates a merge commit or
-rebases.
+If either check fails, nothing is written. Unrelated staged changes are kept in
+the index, including
+.B skip\-worktree
+and
+.B assume\-unchanged
+flags. Pull never creates a merge commit or rebases.
+.PP
+Ref updates are written through a sibling
+.B .lock
+file and renamed into place.
+.BR index ,
+.BR FETCH_HEAD ,
+and
+.B ORIG_HEAD
+are written atomically as well, so an interrupted update does not leave a
+truncated file behind.
 .PP
 These checks are not a sandbox: as with
 .BR git-clone (1),
@@ -263,10 +324,13 @@ the whole pack and all inflated objects are held in memory, and a single object
 larger than 2 GiB is rejected; pull is fast-forward-only (no merge, rebase, or
 conflict resolution); pull cannot fetch into a shallow clone or switch away from
 an existing branch (from a detached HEAD it can check out a branch when that is
-a fast-forward or the local tip is ahead); fetch does not prune remote-tracking
-refs for branches deleted upstream; submodules are not cloned or updated; remote
-tags are updated without Git's clobber check; no partial clone, LFS, hooks, or
-reflogs; no retry or resume on network failures.
+a fast-forward or the local tip is ahead);
+.B \-\-prune
+is skipped when
+.B \-\-branch
+limits the fetch; tags are fetched in full rather than Git's
+reachability-based auto-follow; submodules are not cloned or updated; no partial
+clone, LFS, hooks, or reflogs; no retry or resume on network failures.
 .SH "SEE ALSO"
 .BR git-clone (1),
 .BR git-upload-pack (1),

@@ -30,6 +30,8 @@ typedef struct {
     uint32_t mode;
     struct stat st;
     int has_stat;
+    uint16_t assume_valid;
+    uint16_t ext_flags;
 } IndexEntry;
 
 typedef struct {
@@ -124,15 +126,23 @@ static int ensure_parents(const char *worktree, const char *rel)
     return rc;
 }
 
-static void index_write(const char *gitdir, Index *idx)
+static int index_write(const char *gitdir, Index *idx)
 {
     if (idx->count > 1)
         qsort(idx->entries, idx->count, sizeof(IndexEntry), cmp_entry);
 
+    int extended = 0;
+    for (size_t i = 0; i < idx->count; i++) {
+        if (idx->entries[i].ext_flags) {
+            extended = 1;
+            break;
+        }
+    }
+
     Buf b;
     buf_init(&b);
     buf_append(&b, "DIRC", 4);
-    put_be32(&b, 2);
+    put_be32(&b, extended ? 3 : 2);
     put_be32(&b, (uint32_t)idx->count);
 
     for (size_t i = 0; i < idx->count; i++) {
@@ -154,13 +164,22 @@ static void index_write(const char *gitdir, Index *idx)
 
         size_t namelen = strlen(e->path);
         uint16_t flags = (uint16_t)(namelen < 0xFFF ? namelen : 0xFFF);
+        if (e->assume_valid)
+            flags |= 0x8000;
+        if (e->ext_flags)
+            flags |= 0x4000;
         unsigned char fl[2] = {(unsigned char)(flags >> 8),
                                (unsigned char)flags};
         buf_append(&b, fl, 2);
+        if (e->ext_flags) {
+            unsigned char xf[2] = {(unsigned char)(e->ext_flags >> 8),
+                                   (unsigned char)e->ext_flags};
+            buf_append(&b, xf, 2);
+        }
         buf_append(&b, e->path, namelen);
         buf_putc(&b, 0);
 
-        size_t entry_len = 62 + namelen + 1;
+        size_t entry_len = 62 + (e->ext_flags ? 2 : 0) + namelen + 1;
         while (entry_len % 8) {
             buf_putc(&b, 0);
             entry_len++;
@@ -172,9 +191,10 @@ static void index_write(const char *gitdir, Index *idx)
     buf_append(&b, digest, OID_RAW);
 
     char *path = path_join(gitdir, "index");
-    write_file(path, b.data, b.len, 0644);
+    int rc = write_file_atomic(path, b.data, b.len, 0644);
     free(path);
     buf_free(&b);
+    return rc;
 }
 
 static int parse_mode(const unsigned char *s, size_t len, unsigned *mode)
@@ -454,7 +474,7 @@ int checkout_commit(const char *gitdir, const char *worktree,
     if (rc == 0)
         rc = materialize(gitdir, worktree, &idx);
     if (rc == 0)
-        index_write(gitdir, &idx);
+        rc = index_write(gitdir, &idx);
 
     for (size_t i = 0; i < idx.count; i++)
         free(idx.entries[i].path);
@@ -482,6 +502,57 @@ static IndexEntry *index_find(Index *idx, const char *path)
             hi = mid;
     }
     return NULL;
+}
+
+/* True when the update changes path between the old and new trees. */
+static int tree_entry_changed(Index *old_idx, Index *new_idx, const char *path)
+{
+    IndexEntry *o = index_find(old_idx, path);
+    IndexEntry *n = index_find(new_idx, path);
+    if (!o && !n)
+        return 0;
+    if (!o || !n)
+        return 1;
+    return o->mode != n->mode || memcmp(o->oid, n->oid, OID_RAW) != 0;
+}
+
+/* Append a deep copy of src (the path is duplicated). */
+static void index_add_copy(Index *idx, const IndexEntry *src)
+{
+    if (idx->count == idx->cap) {
+        idx->cap = idx->cap ? idx->cap * 2 : 64;
+        idx->entries = xrealloc(idx->entries, idx->cap * sizeof(IndexEntry));
+    }
+    IndexEntry *e = &idx->entries[idx->count++];
+    *e = *src;
+    e->path = xstrdup(src->path);
+}
+
+/* Remove path from a sorted index, preserving the order of the rest. */
+static void index_remove_path(Index *idx, const char *path)
+{
+    size_t w = 0;
+    for (size_t i = 0; i < idx->count; i++) {
+        if (strcmp(idx->entries[i].path, path) == 0) {
+            free(idx->entries[i].path);
+            continue;
+        }
+        if (w != i)
+            idx->entries[w] = idx->entries[i];
+        w++;
+    }
+    idx->count = w;
+}
+
+/* Copy the parts of a staged entry that describe content and cache state. */
+static void index_take_entry(IndexEntry *dst, const IndexEntry *src)
+{
+    memcpy(dst->oid, src->oid, OID_RAW);
+    dst->mode = src->mode;
+    dst->st = src->st;
+    dst->has_stat = src->has_stat;
+    dst->assume_valid = src->assume_valid;
+    dst->ext_flags = src->ext_flags;
 }
 
 /* Read .git/index (DIRC v2 or v3) so unchanged entries can keep their stat
@@ -526,10 +597,18 @@ static int index_read(const char *gitdir, Index *idx)
         unsigned char oid[OID_RAW];
         memcpy(oid, e + 40, OID_RAW);
         uint16_t flags = (uint16_t)(((uint16_t)e[60] << 8) | e[61]);
+        if ((flags & 0x3000) != 0) {
+            /* Unmerged entries use multiple stages; refuse rather than
+             * silently pick one. */
+            goto corrupt;
+        }
         int extended = (flags & 0x4000) != 0;
         size_t fixed = 62 + (extended ? 2 : 0);
         if (pos + fixed > end)
             goto corrupt;
+        uint16_t ext_flags = 0;
+        if (extended)
+            ext_flags = (uint16_t)(((uint16_t)e[62] << 8) | e[63]);
 
         const unsigned char *name = e + fixed;
         size_t max_name = end - (pos + fixed);
@@ -557,6 +636,8 @@ static int index_read(const char *gitdir, Index *idx)
         ie->path = xstrndup((char *)name, name_len);
         memcpy(ie->oid, oid, OID_RAW);
         ie->mode = mode;
+        ie->assume_valid = (flags & 0x8000) ? 1 : 0;
+        ie->ext_flags = ext_flags;
 
         uint32_t ctime_s = get_be32(e + 0);
         uint32_t ctime_ns = get_be32(e + 4);
@@ -861,26 +942,38 @@ int checkout_update(const char *gitdir, const char *worktree,
     if (validate_index(&old_idx) != 0 || validate_index(&new_idx) != 0)
         goto done;
 
-    /* Read the on-disk index. It should describe the old tree; if it does not,
-     * something is staged and pulling would silently mix it with the update. */
+    /* Read the on-disk index so staged changes can be preserved. Only staged
+     * changes on paths this update touches are unsafe; unrelated staged work is
+     * kept in the index below. */
     int disk_rc = index_read(gitdir, &disk_idx);
     if (disk_rc < 0) {
         warn_cgc("cannot read .git/index (unsupported or corrupt index)");
         goto done;
     }
+    if (disk_rc == 0 && validate_index(&disk_idx) != 0)
+        goto done;
     if (disk_rc == 0) {
         for (size_t i = 0; i < disk_idx.count; i++) {
             IndexEntry *d = &disk_idx.entries[i];
             IndexEntry *o = index_find(&old_idx, d->path);
             if (!o || o->mode != d->mode ||
                 memcmp(o->oid, d->oid, OID_RAW) != 0) {
-                warn_cgc("staged changes to '%s' would be lost", d->path);
-                goto done;
+                IndexEntry *n = index_find(&new_idx, d->path);
+                int already_new =
+                    n && n->mode == d->mode &&
+                    memcmp(n->oid, d->oid, OID_RAW) == 0;
+                if (!already_new &&
+                    tree_entry_changed(&old_idx, &new_idx, d->path)) {
+                    warn_cgc("staged changes to '%s' would be lost", d->path);
+                    goto done;
+                }
             }
         }
         for (size_t i = 0; i < old_idx.count; i++) {
             IndexEntry *o = &old_idx.entries[i];
-            if (!index_find(&disk_idx, o->path)) {
+            if (!index_find(&disk_idx, o->path) &&
+                index_find(&new_idx, o->path) &&
+                tree_entry_changed(&old_idx, &new_idx, o->path)) {
                 warn_cgc("staged deletion of '%s' would be lost", o->path);
                 goto done;
             }
@@ -998,17 +1091,8 @@ int checkout_update(const char *gitdir, const char *worktree,
         IndexEntry *o = index_find(&old_idx, n->path);
         int changed = !o || o->mode != n->mode ||
                       memcmp(o->oid, n->oid, OID_RAW) != 0;
-        if (!changed) {
-            /* Keep the old index's stat cache. Refreshing it here would make
-             * Git believe a locally modified file still matches the index. */
-            IndexEntry *d = disk_rc == 0 ? index_find(&disk_idx, n->path)
-                                         : NULL;
-            if (d && d->has_stat) {
-                n->st = d->st;
-                n->has_stat = 1;
-            }
+        if (!changed)
             continue;
-        }
         if (cgc_interrupted)
             goto fail;
 
@@ -1034,7 +1118,40 @@ int checkout_update(const char *gitdir, const char *worktree,
         progress_checkout_update(++done_count, changes);
     }
 
-    index_write(gitdir, &new_idx);
+    /* Preserve staged content, index flags, and stat data for paths this update
+     * does not touch. Affected paths take the new tree's content. */
+    Index staged_adds;
+    memset(&staged_adds, 0, sizeof(staged_adds));
+    if (disk_rc == 0) {
+        for (size_t i = 0; i < disk_idx.count; i++) {
+            IndexEntry *d = &disk_idx.entries[i];
+            if (tree_entry_changed(&old_idx, &new_idx, d->path))
+                continue;
+            IndexEntry *n = index_find(&new_idx, d->path);
+            if (n)
+                index_take_entry(n, d);
+            else
+                index_add_copy(&staged_adds, d);
+        }
+        for (size_t i = 0; i < old_idx.count; i++) {
+            IndexEntry *o = &old_idx.entries[i];
+            if (!index_find(&disk_idx, o->path) &&
+                !tree_entry_changed(&old_idx, &new_idx, o->path))
+                index_remove_path(&new_idx, o->path);
+        }
+        for (size_t i = 0; i < staged_adds.count; i++)
+            index_add_copy(&new_idx, &staged_adds.entries[i]);
+    }
+    for (size_t i = 0; i < staged_adds.count; i++)
+        free(staged_adds.entries[i].path);
+    free(staged_adds.entries);
+
+    if (validate_index(&new_idx) != 0)
+        goto fail;
+    if (index_write(gitdir, &new_idx) != 0) {
+        warn_cgc("cannot write .git/index");
+        goto fail;
+    }
     progress_checkout_end(changes);
     rc = 0;
     goto done;

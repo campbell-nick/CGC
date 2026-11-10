@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +57,59 @@ int repo_init(const char *gitdir)
     return rc;
 }
 
+/* Write path through a sibling .lock file and rename it into place, matching
+ * Git's ref update discipline. The caller must ensure the parent directory
+ * exists. Returns 0 on success. */
+static int write_locked_file(const char *path, const void *data, size_t len,
+                             mode_t mode)
+{
+    Buf lock;
+    buf_init(&lock);
+    buf_appendf(&lock, "%s.lock", path);
+
+    int fd = open((char *)lock.data, O_WRONLY | O_CREAT | O_EXCL, mode);
+    if (fd < 0) {
+        buf_free(&lock);
+        return -1;
+    }
+
+    int rc = -1;
+    if (fchmod(fd, mode) != 0)
+        goto fail;
+
+    const unsigned char *p = data;
+    size_t left = len;
+    while (left) {
+        ssize_t n = write(fd, p, left);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            goto fail;
+        }
+        p += (size_t)n;
+        left -= (size_t)n;
+    }
+    if (fsync(fd) != 0)
+        goto fail;
+    if (close(fd) != 0) {
+        fd = -1;
+        goto fail;
+    }
+    fd = -1;
+
+    if (rename((char *)lock.data, path) != 0)
+        goto fail;
+    rc = 0;
+
+fail:
+    if (fd >= 0)
+        close(fd);
+    if (rc != 0)
+        unlink((char *)lock.data);
+    buf_free(&lock);
+    return rc;
+}
+
 static int write_ref_file(const char *gitdir, const char *name,
                           const unsigned char oid[OID_RAW])
 {
@@ -71,29 +125,31 @@ static int write_ref_file(const char *gitdir, const char *name,
         char line[OID_HEX + 2];
         memcpy(line, hex, OID_HEX);
         line[OID_HEX] = '\n';
-        rc = write_file(path, line, OID_HEX + 1, 0644);
+        rc = write_locked_file(path, line, OID_HEX + 1, 0644);
     }
     free(dir);
     free(path);
     return rc;
 }
 
-static void write_symref_file(const char *gitdir, const char *name,
-                              const char *target)
+static int write_symref_file(const char *gitdir, const char *name,
+                             const char *target)
 {
     if (!ref_name_is_valid(name) || !ref_name_is_valid(target))
-        return;
+        return -1;
     char *path = path_join(gitdir, name);
     char *dir = path_dirname(path);
+    int rc = -1;
     if (mkdir_p(dir, 0777) == 0) {
         Buf b;
         buf_init(&b);
         buf_appendf(&b, "ref: %s\n", target);
-        write_file(path, b.data, b.len, 0644);
+        rc = write_locked_file(path, b.data, b.len, 0644);
         buf_free(&b);
     }
     free(dir);
     free(path);
+    return rc;
 }
 
 int repo_write_refs(const char *gitdir, const RemoteRefs *refs)
@@ -103,25 +159,32 @@ int repo_write_refs(const char *gitdir, const RemoteRefs *refs)
         if (strcmp(r->name, "HEAD") == 0)
             continue;
 
+        int rc;
         if (strncmp(r->name, "refs/heads/", 11) == 0) {
             if (r->symref)
-                write_symref_file(gitdir, r->name, r->symref);
+                rc = write_symref_file(gitdir, r->name, r->symref);
             else
-                write_ref_file(gitdir, r->name, r->oid);
+                rc = write_ref_file(gitdir, r->name, r->oid);
+            if (rc != 0)
+                return -1;
 
             Buf remote;
             buf_init(&remote);
             buf_appendf(&remote, "refs/remotes/origin/%s", r->name + 11);
             if (r->symref)
-                write_symref_file(gitdir, (char *)remote.data, r->symref);
+                rc = write_symref_file(gitdir, (char *)remote.data, r->symref);
             else
-                write_ref_file(gitdir, (char *)remote.data, r->oid);
+                rc = write_ref_file(gitdir, (char *)remote.data, r->oid);
             buf_free(&remote);
+            if (rc != 0)
+                return -1;
         } else if (strncmp(r->name, "refs/tags/", 10) == 0) {
             if (r->symref)
-                write_symref_file(gitdir, r->name, r->symref);
+                rc = write_symref_file(gitdir, r->name, r->symref);
             else
-                write_ref_file(gitdir, r->name, r->oid);
+                rc = write_ref_file(gitdir, r->name, r->oid);
+            if (rc != 0)
+                return -1;
         }
     }
 
@@ -129,8 +192,11 @@ int repo_write_refs(const char *gitdir, const RemoteRefs *refs)
         Buf target;
         buf_init(&target);
         buf_appendf(&target, "refs/remotes/origin/%s", refs->default_ref + 11);
-        write_symref_file(gitdir, "refs/remotes/origin/HEAD", (char *)target.data);
+        int rc = write_symref_file(gitdir, "refs/remotes/origin/HEAD",
+                                   (char *)target.data);
         buf_free(&target);
+        if (rc != 0)
+            return -1;
     }
     return 0;
 }
@@ -143,7 +209,7 @@ int repo_set_head(const char *gitdir, const char *default_ref)
     Buf b;
     buf_init(&b);
     buf_appendf(&b, "ref: %s\n", default_ref);
-    int rc = write_file(path, b.data, b.len, 0644);
+    int rc = write_locked_file(path, b.data, b.len, 0644);
     buf_free(&b);
     free(path);
     return rc;
@@ -158,7 +224,7 @@ int repo_set_head_detached(const char *gitdir,
     char line[OID_HEX + 2];
     memcpy(line, hex, OID_HEX);
     line[OID_HEX] = '\n';
-    int rc = write_file(path, line, OID_HEX + 1, 0644);
+    int rc = write_locked_file(path, line, OID_HEX + 1, 0644);
     free(path);
     return rc;
 }
@@ -293,24 +359,64 @@ int repo_write_ref(const char *gitdir, const char *name,
     return write_ref_file(gitdir, name, oid);
 }
 
-int repo_write_remote_refs(const char *gitdir, const RemoteRefs *refs)
+static int refs_has_name(const RemoteRefs *refs, const char *name)
 {
+    for (size_t i = 0; i < refs->count; i++)
+        if (strcmp(refs->refs[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+int repo_write_remote_refs(const char *gitdir, const RemoteRefs *refs,
+                           const RefWriteOptions *opts)
+{
+    int fetch_tags = !opts || !opts->no_tags;
+
+    /* Preflight every tag before writing anything. A clobber refusal must not
+     * leave the remote-tracking refs half updated. */
+    if (fetch_tags) {
+        for (size_t i = 0; i < refs->count; i++) {
+            const Ref *r = &refs->refs[i];
+            if (strncmp(r->name, "refs/tags/", 10) != 0 || r->symref)
+                continue;
+
+            unsigned char existing[OID_RAW];
+            int rr = repo_read_ref(gitdir, r->name, existing);
+            if (rr < 0) {
+                warn_cgc("cannot read local tag '%s'", r->name + 10);
+                return -1;
+            }
+            if (rr == 0 && memcmp(existing, r->oid, OID_RAW) != 0 &&
+                (!opts || !opts->force_tags)) {
+                warn_cgc("tag '%s' would be clobbered "
+                         "(use --force to overwrite)",
+                         r->name + 10);
+                return -1;
+            }
+        }
+    }
+
     for (size_t i = 0; i < refs->count; i++) {
         const Ref *r = &refs->refs[i];
+        int rc;
         if (strncmp(r->name, "refs/heads/", 11) == 0) {
             Buf remote;
             buf_init(&remote);
             buf_appendf(&remote, "refs/remotes/origin/%s", r->name + 11);
             if (r->symref)
-                write_symref_file(gitdir, (char *)remote.data, r->symref);
+                rc = write_symref_file(gitdir, (char *)remote.data, r->symref);
             else
-                write_ref_file(gitdir, (char *)remote.data, r->oid);
+                rc = write_ref_file(gitdir, (char *)remote.data, r->oid);
             buf_free(&remote);
-        } else if (strncmp(r->name, "refs/tags/", 10) == 0) {
+            if (rc != 0)
+                return -1;
+        } else if (fetch_tags && strncmp(r->name, "refs/tags/", 10) == 0) {
             if (r->symref)
-                write_symref_file(gitdir, r->name, r->symref);
+                rc = write_symref_file(gitdir, r->name, r->symref);
             else
-                write_ref_file(gitdir, r->name, r->oid);
+                rc = write_ref_file(gitdir, r->name, r->oid);
+            if (rc != 0)
+                return -1;
         }
     }
 
@@ -319,11 +425,205 @@ int repo_write_remote_refs(const char *gitdir, const RemoteRefs *refs)
         Buf target;
         buf_init(&target);
         buf_appendf(&target, "refs/remotes/origin/%s", refs->default_ref + 11);
-        write_symref_file(gitdir, "refs/remotes/origin/HEAD",
-                          (char *)target.data);
+        int rc = write_symref_file(gitdir, "refs/remotes/origin/HEAD",
+                                   (char *)target.data);
         buf_free(&target);
+        if (rc != 0)
+            return -1;
     }
     return 0;
+}
+
+/* True when rel (a refs/remotes/origin/... name) still has an advertised
+ * branch behind it. HEAD and unrelated refs are always kept. */
+static int remote_ref_is_expected(const RemoteRefs *refs, const char *rel)
+{
+    static const char prefix[] = "refs/remotes/origin/";
+    if (strncmp(rel, prefix, sizeof(prefix) - 1) != 0)
+        return 1;
+
+    const char *branch = rel + sizeof(prefix) - 1;
+    if (strcmp(branch, "HEAD") == 0)
+        return 1;
+
+    Buf full;
+    buf_init(&full);
+    buf_appendf(&full, "refs/heads/%s", branch);
+    int found = refs_has_name(refs, (char *)full.data);
+    buf_free(&full);
+    return found;
+}
+
+static int prune_loose_refs(const char *gitdir, const char *rel,
+                            const RemoteRefs *refs)
+{
+    char *dir = path_join(gitdir, rel);
+    DIR *d = opendir(dir);
+    if (!d) {
+        int e = errno;
+        free(dir);
+        return e == ENOENT ? 0 : -1;
+    }
+
+    int rc = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+
+        Buf child;
+        buf_init(&child);
+        buf_appendf(&child, "%s/%s", rel, de->d_name);
+
+        char *full = path_join(gitdir, (char *)child.data);
+        struct stat st;
+        if (lstat(full, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                if (prune_loose_refs(gitdir, (char *)child.data, refs) != 0)
+                    rc = -1;
+                /* Remove the directory if pruning emptied it. */
+                rmdir(full);
+            } else if (S_ISREG(st.st_mode) &&
+                       !remote_ref_is_expected(refs, (char *)child.data)) {
+                if (unlink(full) != 0)
+                    rc = -1;
+            }
+        }
+        free(full);
+        buf_free(&child);
+    }
+
+    closedir(d);
+    rmdir(dir);
+    free(dir);
+    return rc;
+}
+
+/* Remove pruned refs from packed-refs, including any peeled line that follows
+ * them. Returns 0 when the file is absent or nothing changed. */
+static int prune_packed_refs(const char *gitdir, const RemoteRefs *refs)
+{
+    char *path = path_join(gitdir, "packed-refs");
+    Buf in;
+    buf_init(&in);
+    if (read_file(path, &in) != 0) {
+        int e = errno;
+        buf_free(&in);
+        free(path);
+        return e == ENOENT ? 0 : -1;
+    }
+
+    Buf out;
+    buf_init(&out);
+    int changed = 0;
+    int skip_peeled = 0;
+    size_t pos = 0;
+    while (pos < in.len) {
+        size_t start = pos;
+        while (pos < in.len && in.data[pos] != '\n')
+            pos++;
+        size_t len = pos - start;
+        int has_nl = pos < in.len;
+        if (has_nl)
+            pos++;
+
+        const char *line = (const char *)in.data + start;
+        if (len > 0 && line[0] == '^') {
+            if (skip_peeled) {
+                changed = 1;
+                skip_peeled = 0;
+                continue;
+            }
+        } else {
+            skip_peeled = 0;
+            if (len > OID_HEX + 1 && line[OID_HEX] == ' ') {
+                size_t name_len = len - (OID_HEX + 1);
+                if (name_len > 0 && line[len - 1] == '\r')
+                    name_len--;
+                char *name = xstrndup(line + OID_HEX + 1, name_len);
+                int drop = !remote_ref_is_expected(refs, name);
+                free(name);
+                if (drop) {
+                    changed = 1;
+                    skip_peeled = 1;
+                    continue;
+                }
+            }
+        }
+
+        buf_append(&out, line, len);
+        if (has_nl)
+            buf_putc(&out, '\n');
+    }
+
+    int rc = 0;
+    if (changed)
+        rc = write_file_atomic(path, out.data, out.len, 0644);
+    buf_free(&out);
+    buf_free(&in);
+    free(path);
+    return rc;
+}
+
+int repo_prune_remote_refs(const char *gitdir, const RemoteRefs *refs)
+{
+    int rc = prune_loose_refs(gitdir, "refs/remotes/origin", refs);
+    if (prune_packed_refs(gitdir, refs) != 0)
+        rc = -1;
+    return rc;
+}
+
+int repo_write_fetch_head(const char *gitdir, const RemoteRefs *refs,
+                          const char *url, const char *merge_ref)
+{
+    Buf b;
+    buf_init(&b);
+    for (size_t i = 0; i < refs->count; i++) {
+        const Ref *r = &refs->refs[i];
+        if (strcmp(r->name, "HEAD") == 0)
+            continue;
+
+        char hex[OID_HEX + 1];
+        oid_hex(r->oid, hex);
+
+        const char *kind = NULL;
+        const char *name = NULL;
+        if (strncmp(r->name, "refs/heads/", 11) == 0) {
+            kind = "branch";
+            name = r->name + 11;
+        } else if (strncmp(r->name, "refs/tags/", 10) == 0) {
+            kind = "tag";
+            name = r->name + 10;
+        } else {
+            continue;
+        }
+
+        int mergeable = merge_ref && strcmp(r->name, merge_ref) == 0;
+        buf_appendf(&b, "%s\t%s\t%s '%s' of %s\n", hex,
+                    mergeable ? "" : "not-for-merge", kind, name, url);
+    }
+
+    char *path = path_join(gitdir, "FETCH_HEAD");
+    int rc = write_file_atomic(path, b.data, b.len, 0644);
+    free(path);
+    buf_free(&b);
+    return rc;
+}
+
+int repo_write_orig_head(const char *gitdir,
+                         const unsigned char oid[OID_RAW])
+{
+    char hex[OID_HEX + 1];
+    oid_hex(oid, hex);
+    char line[OID_HEX + 2];
+    memcpy(line, hex, OID_HEX);
+    line[OID_HEX] = '\n';
+    line[OID_HEX + 1] = '\0';
+
+    char *path = path_join(gitdir, "ORIG_HEAD");
+    int rc = write_file_atomic(path, line, OID_HEX + 1, 0644);
+    free(path);
+    return rc;
 }
 
 int repo_read_origin_url(const char *gitdir, char **out_url)

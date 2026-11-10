@@ -129,6 +129,10 @@ static void update_usage(FILE *out, int pull)
             "                  read the bearer token from the first line of <path>\n"
             "  -b, --branch <name>\n"
             "                  %s\n"
+            "  --tags          fetch and update all advertised tags (default)\n"
+            "  --no-tags       do not fetch or update tags\n"
+            "  --force         overwrite a local tag that differs from the remote\n"
+            "  --prune         delete stale refs/remotes/origin/* refs\n"
             "  -h, --help      show this help\n"
             "  -V, --version   show version\n"
             "\n"
@@ -152,6 +156,8 @@ static int run_subcommand(int argc, char **argv, int pull)
     const char *branch = NULL;
     const char *dir = ".";
     int have_dir = 0;
+    UpdateOptions opts;
+    memset(&opts, 0, sizeof(opts));
 
     for (int i = 2; i < argc; i++) {
         const char *a = argv[i];
@@ -165,6 +171,14 @@ static int run_subcommand(int argc, char **argv, int pull)
             return 0;
         } else if (strcmp(a, "-q") == 0 || strcmp(a, "--quiet") == 0) {
             quiet = 1;
+        } else if (strcmp(a, "--force") == 0) {
+            opts.force_tags = 1;
+        } else if (strcmp(a, "--tags") == 0) {
+            opts.no_tags = 0;
+        } else if (strcmp(a, "--no-tags") == 0) {
+            opts.no_tags = 1;
+        } else if (strcmp(a, "--prune") == 0) {
+            opts.prune = 1;
         } else if (strcmp(a, "--token") == 0) {
             if (i + 1 >= argc)
                 die("--token requires an argument");
@@ -204,7 +218,7 @@ static int run_subcommand(int argc, char **argv, int pull)
     http_set_token(token);
     free(token_storage);
 
-    return update_run(dir, branch, pull) == 0 ? 0 : 1;
+    return update_run(dir, branch, pull, &opts) == 0 ? 0 : 1;
 }
 
 static void remove_tree(const char *path)
@@ -509,7 +523,10 @@ int main(int argc, char **argv)
             remote_refs_free(&refs);
             die("fetch failed");
         }
-        repo_write_refs(gitdir, &refs);
+        if (repo_write_refs(gitdir, &refs) != 0) {
+            remote_refs_free(&refs);
+            die("cannot write refs");
+        }
 
         if (has_target) {
             if (checkout_commit(gitdir, dest, target_oid) != 0) {

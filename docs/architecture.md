@@ -38,16 +38,20 @@ different flow (`update.c`):
    The server sends only objects reachable from the wants but not the haves.
 3. **Unpack** — the same pack reader writes the new objects. An empty pack
    means the clone was already up to date.
-4. **Fetch bookkeeping** — rewrite `refs/remotes/origin/*` and tags. Local
-   branches and the worktree are untouched.
+4. **Fetch bookkeeping** — rewrite `refs/remotes/origin/*` and tags. Existing
+   tags are preflighted and refused if the remote moved them, unless `--force`.
+   `--no-tags` skips tags, and `--prune` removes stale loose and packed
+   remote-tracking refs. Local branches and the worktree are untouched.
+   `FETCH_HEAD` is written atomically.
 5. **Fast-forward check** (`pull` only) — walk the new commit's parents to
    confirm the local branch tip is an ancestor. Merges and rebases are not
    supported.
 6. **Worktree update** (`pull` only) — `checkout_update` compares the old and
    new trees. Unchanged files are left alone; changed and deleted files must
    still match the old blob, and added paths must not collide with untracked
-   files. It then writes the new index and advances the local branch and
-   `HEAD`.
+   files. Staged changes on untouched paths and index flags are preserved in
+   the new index. `ORIG_HEAD` records the old `HEAD` before it moves. Ref, index,
+   and metadata writes go through atomic rename.
 
 ## Source layout
 

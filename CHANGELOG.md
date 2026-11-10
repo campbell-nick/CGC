@@ -18,14 +18,30 @@ All notable changes to this project are documented here. The format follows
   fast-forwarding it when possible and refusing divergence.
 - Fetch negotiation with `have` lines, so only objects missing from the local
   clone are transferred.
+- Tag clobber protection: `fetch`, `pull`, and `update` refuse to move an
+  existing local tag that points at a different object unless `--force` is
+  given. All tags are preflighted before any ref is written.
+- `--no-tags` and `--tags` to skip or restore tag fetching.
+- `--prune` to delete remote-tracking refs for branches deleted upstream,
+  including entries in `packed-refs`.
+- `.git/FETCH_HEAD` for fetch and pull, and `.git/ORIG_HEAD` before a pull
+  moves `HEAD`.
 - End-to-end coverage for fetch, pull, the `update` alias, dirty-worktree
-  refusal, and non-fast-forward refusal.
+  refusal, and non-fast-forward refusal, plus tag safety, `--prune`, index
+  flags, and staged-change handling.
 
 ### Changed
 
 - Pull is fast-forward-only and preserves unchanged files. It refuses to
   overwrite local modifications or untracked paths, and refuses to fetch into a
   shallow clone.
+- Pull preserves unrelated staged changes instead of refusing any dirty index.
+  It refuses only when a staged change overlaps a path the update changes and
+  differs from the new tree. `skip-worktree`, `assume-unchanged`, and extended
+  index flags survive the update.
+- Refs are written through a sibling `.lock` file and renamed into place; the
+  index, `FETCH_HEAD`, and `ORIG_HEAD` are written atomically. `index_write`
+  failures are reported instead of ignored.
 - An empty fetch pack is treated as "already up to date" instead of an error,
   and no receive/delta summary is printed for a no-op fetch.
 

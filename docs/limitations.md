@@ -11,6 +11,12 @@
   missing objects are transferred
 - Fast-forward-only pulls that preserve unchanged files and refuse to overwrite
   local modifications or untracked paths
+- Unrelated staged changes and index flags (`skip-worktree`,
+  `assume-unchanged`) survive a pull
+- Tag clobber protection (`--force` to override) and `--no-tags`
+- `--prune` for stale remote-tracking refs, including packed refs
+- `.git/FETCH_HEAD` and `.git/ORIG_HEAD` updates
+- Atomic ref, index, and metadata writes
 - `ofs-delta` and `ref-delta` resolution, including delta chains
 - Nested trees, symlinks, executable files
 - Empty repositories (creates `.git` with the advertised default branch)
@@ -34,13 +40,14 @@
 - Pull refuses to switch away from an existing branch, and refuses to fetch into
   a shallow clone. From a detached `HEAD`, `pull --branch` switches to the
   branch, fast-forwarding it when possible and refusing divergence.
-- Fetch does not prune remote-tracking refs for branches deleted upstream.
+- `--prune` is skipped when `--branch` limits the fetch, because the omitted
+  branches would otherwise look deleted.
 - Pull reads `.git/index` (versions 2 and 3) to detect staged changes and
-  preserve stat data; other index versions are rejected.
+  preserve stat data and flags; other index versions are rejected.
 - Submodules are represented as empty directories; they are not cloned or
   updated.
-- Remote tags are updated unconditionally, without Git's "would clobber
-  existing tag" check.
+- Tags are fetched in full rather than Git's reachability-based auto-follow.
+  A conflicting local tag is refused unless `--force` is given.
 - No partial/filtered clone, no submodule recursion (`--recursive`), no Git LFS,
   no hooks, no reflogs.
 - No retry or resume on network failures.

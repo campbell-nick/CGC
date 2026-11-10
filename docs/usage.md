@@ -49,8 +49,10 @@ directories are searched for the repository.
 
 Pull is fast-forward-only. It refuses when the remote branch is not a
 descendant of the local branch, when an affected file has local modifications,
-or when an untracked path would be overwritten. Fetching into a shallow clone
-is not supported yet.
+or when an untracked path would be overwritten. Staged changes are preserved
+when they do not overlap the update; a staged change to a path the update
+touches is refused unless it already matches the new tree. Fetching into a
+shallow clone is not supported yet.
 
 `--branch <name>` limits `fetch` to that branch (tags are still fetched) and
 selects the branch for `pull`/`update`. Pull refuses to switch away from an
@@ -58,6 +60,14 @@ existing branch; check out the target branch first. It can create and check out
 a branch when `HEAD` is unborn or detached. From a detached `HEAD` it switches
 to the branch, fast-forwarding it when possible, keeping the local tip when it
 is ahead, and refusing when local and remote have diverged.
+
+Tags are fetched by default. An existing local tag is never overwritten when
+the remote tag points at a different object; use `--force` to allow that.
+`--force` only relaxes tag clobber protection; pull remains fast-forward-only.
+`--no-tags` skips tags entirely. `--prune` deletes remote-tracking refs for
+branches deleted upstream, including entries in `packed-refs`; it is skipped
+when `--branch` limits the fetch. `fetch` and `pull` write `.git/FETCH_HEAD`,
+and `pull` writes `.git/ORIG_HEAD` before moving `HEAD`.
 
 ## Options
 
@@ -70,6 +80,10 @@ is ahead, and refusing when local and remote have diverged.
                 clone: check out <name> (branch or tag) instead of the
                 remote's default branch; tags use a detached HEAD
                 fetch/pull: limit or select the branch (see Subcommands)
+--tags          fetch and update all advertised tags (the default)
+--no-tags       do not fetch or update tags
+--force         overwrite a local tag that differs from the remote
+--prune         delete stale refs under refs/remotes/origin
 --depth <n>     create a shallow clone with history truncated to n commits
 --single-branch clone only the history of one branch
 --no-single-branch
@@ -80,7 +94,8 @@ is ahead, and refusing when local and remote have diverged.
 ```
 
 `--host`, `--depth`, `--single-branch`, and `--no-single-branch` are only
-valid for cloning.
+valid for cloning. `--tags`, `--no-tags`, `--force`, and `--prune` are only
+valid for `fetch`, `pull`, and `update`.
 
 ## Output
 
@@ -105,8 +120,13 @@ escaping the target directory or injecting configuration.
 
 `pull` checks the worktree before changing it: an affected file must still
 match the old commit, and an added path must not already exist as an untracked
-file. If either check fails, nothing is written. Pull never creates a merge
-commit or rebases.
+file. If either check fails, nothing is written. Unrelated staged changes are
+kept in the index, including `skip-worktree` and `assume-unchanged` flags. Pull
+never creates a merge commit or rebases.
+
+Ref updates are written through a sibling `.lock` file and renamed into place.
+`index`, `FETCH_HEAD`, and `ORIG_HEAD` are written atomically as well, so an
+interrupted update does not leave a truncated file behind.
 
 These checks protect the clone destination; they are not a sandbox. As with
 `git clone`, do not run code from an untrusted repository, and review hooks and

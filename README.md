@@ -15,6 +15,13 @@ loose objects and refs, checks out the working tree, and writes a Git index.
 It can also `fetch`, `pull`, and `update` an existing clone, negotiating with
 `have` lines and fast-forwarding the current branch.
 
+Fetch and pull update remote-tracking refs and tags safely: a local tag that
+differs from the remote is refused unless `--force` is given, `--no-tags` skips
+tags, and `--prune` removes remote-tracking refs for deleted branches (including
+packed refs). Pulls preserve unrelated staged changes and index flags such as
+`skip-worktree` and `assume-unchanged`. `FETCH_HEAD` and `ORIG_HEAD` are
+maintained, and ref, index, and metadata writes use atomic renames.
+
 ```sh
 make
 ./cgc gh:octocat/Hello-World

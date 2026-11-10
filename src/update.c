@@ -334,7 +334,8 @@ static void report_fetch(const char *gitdir, const RemoteRefs *refs,
     fflush(stderr);
 }
 
-int update_run(const char *start_dir, const char *branch_opt, int pull)
+int update_run(const char *start_dir, const char *branch_opt, int pull,
+               const UpdateOptions *opts)
 {
     char *gitdir = NULL;
     char *worktree = NULL;
@@ -409,6 +410,9 @@ int update_run(const char *start_dir, const char *branch_opt, int pull)
             warn_cgc("remote repository is empty");
             goto done;
         }
+        if (opts && opts->prune && !branch_opt &&
+            repo_prune_remote_refs(gitdir, &refs) != 0)
+            warn_cgc("could not prune stale remote-tracking refs");
         if (!cgc_quiet)
             fprintf(stderr, "From %s\n", url);
         rc = 0;
@@ -420,16 +424,22 @@ int update_run(const char *start_dir, const char *branch_opt, int pull)
         goto done;
     }
 
-    /* With --branch, fetch only that branch (plus tags) and update only its
-     * remote-tracking ref. The Refs are shallow copies owned by `refs`. */
+    /* With --branch, fetch only that branch (plus tags unless --no-tags).
+     * --no-tags on its own removes tags from the request. The Refs are
+     * shallow copies owned by `refs`. */
     const RemoteRefs *active = &refs;
-    if (branch_opt && target_ref) {
+    int no_tags = opts && opts->no_tags;
+    if (branch_opt || no_tags) {
         filtered.refs = xcalloc(refs.count, sizeof(Ref));
         for (size_t i = 0; i < refs.count; i++) {
             const Ref *r = &refs.refs[i];
-            if (strcmp(r->name, target_ref) == 0 ||
-                strncmp(r->name, "refs/tags/", 10) == 0)
-                filtered.refs[filtered.count++] = *r;
+            int is_tag = strncmp(r->name, "refs/tags/", 10) == 0;
+            if (branch_opt && target_ref && strcmp(r->name, target_ref) != 0 &&
+                !is_tag)
+                continue;
+            if (no_tags && is_tag)
+                continue;
+            filtered.refs[filtered.count++] = *r;
         }
         have_filter = 1;
         active = &filtered;
@@ -447,7 +457,23 @@ int update_run(const char *start_dir, const char *branch_opt, int pull)
     }
 
     report_fetch(gitdir, active, url);
-    repo_write_remote_refs(gitdir, active);
+
+    RefWriteOptions ref_opts;
+    memset(&ref_opts, 0, sizeof(ref_opts));
+    ref_opts.force_tags = opts && opts->force_tags;
+    ref_opts.no_tags = no_tags;
+    if (repo_write_remote_refs(gitdir, active, &ref_opts) != 0) {
+        warn_cgc("cannot update remote refs");
+        goto done;
+    }
+    if (repo_write_fetch_head(gitdir, active, url,
+                              pull ? target_ref : NULL) != 0)
+        warn_cgc("cannot write FETCH_HEAD");
+
+    if (opts && opts->prune && !branch_opt) {
+        if (repo_prune_remote_refs(gitdir, active) != 0)
+            warn_cgc("could not prune stale remote-tracking refs");
+    }
 
     if (!pull) {
         rc = 0;
@@ -496,7 +522,10 @@ int update_run(const char *start_dir, const char *branch_opt, int pull)
             }
         }
 
-        if (memcmp(head_oid, target_oid, OID_RAW) != 0 &&
+        int moving = memcmp(head_oid, target_oid, OID_RAW) != 0;
+        if (moving && repo_write_orig_head(gitdir, head_oid) != 0)
+            warn_cgc("cannot write ORIG_HEAD");
+        if (moving &&
             checkout_update(gitdir, worktree, head_oid, target_oid) != 0) {
             warn_cgc("could not update the working tree");
             goto done;
@@ -549,6 +578,8 @@ int update_run(const char *start_dir, const char *branch_opt, int pull)
     }
 
     if (have_local) {
+        if (repo_write_orig_head(gitdir, local_oid) != 0)
+            warn_cgc("cannot write ORIG_HEAD");
         if (checkout_update(gitdir, worktree, local_oid, new_oid) != 0) {
             warn_cgc("could not update the working tree");
             goto done;

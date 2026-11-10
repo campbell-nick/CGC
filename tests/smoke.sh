@@ -219,23 +219,37 @@ test "$(git status --porcelain)" = " M run.sh"
 git checkout -- run.sh
 test -z "$(git status --porcelain)"
 
-# Staged changes are refused rather than mixed with the update.
+# Unrelated staged changes survive a pull and remain staged.
 printf 'staged\n' >> run.sh
 git add run.sh
 printf 'staged upstream\n' > "$WORK/src/unaffected.txt"
 git -C "$WORK/src" add -A
 git -C "$WORK/src" commit -q -m "staged upstream"
 git -C "$WORK/src" push -q "$WORK/server/repo.git" main
-if "$ROOT/cgc" pull -q >/dev/null 2>&1; then
-    echo "smoke: pull accepted staged changes" >&2
-    exit 1
-fi
-test "$(git rev-parse HEAD)" = "$UNAFFECTED_HEAD"
-test "$(cat unaffected.txt)" = unaffected
-git reset -q HEAD run.sh
-git checkout -- run.sh
 "$ROOT/cgc" pull -q
 test "$(cat unaffected.txt)" = "staged upstream"
+test "$(git status --porcelain)" = "M  run.sh"
+git reset -q HEAD run.sh
+git checkout -- run.sh
+test -z "$(git status --porcelain)"
+
+# A staged change that overlaps the update is refused.
+printf 'staged conflict\n' >> unaffected.txt
+git add unaffected.txt
+printf 'overlap upstream\n' > "$WORK/src/unaffected.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m "overlap upstream"
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+OVERLAP_HEAD=$(git rev-parse HEAD)
+if "$ROOT/cgc" pull -q >/dev/null 2>&1; then
+    echo "smoke: pull accepted overlapping staged changes" >&2
+    exit 1
+fi
+test "$(git rev-parse HEAD)" = "$OVERLAP_HEAD"
+git reset -q HEAD unaffected.txt
+git checkout -- unaffected.txt
+"$ROOT/cgc" pull -q
+test "$(cat unaffected.txt)" = "overlap upstream"
 
 # update is an alias for pull.
 printf 'alias\n' > "$WORK/src/alias.txt"
