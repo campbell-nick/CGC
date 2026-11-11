@@ -33,6 +33,7 @@ MANDIR ?= $(PREFIX)/share/man/man1
 BASHCOMPDIR ?= $(PREFIX)/share/bash-completion/completions
 ZSHCOMPDIR ?= $(PREFIX)/share/zsh/site-functions
 FISHCOMPDIR ?= $(PREFIX)/share/fish/vendor_completions.d
+MANROOT := $(patsubst %/,%,$(dir $(MANDIR)))
 
 SRC      := $(wildcard src/*.c)
 OBJ      := $(SRC:.c=.o)
@@ -89,7 +90,7 @@ dist:
 	tar -cf - --exclude='*.o' --exclude='tests/unit' \
 		--exclude='tests/packtest' --exclude='dist' \
 		Makefile VERSION README.md LICENSE CHANGELOG.md cgc.1 \
-		completions docs tests src .gitignore | tar -xf - -C "dist/$(DISTNAME)"
+		completions docs scripts tests src .gitignore | tar -xf - -C "dist/$(DISTNAME)"
 	tar -czf "dist/$(DISTNAME).tar.gz" -C dist "$(DISTNAME)"
 	rm -rf "dist/$(DISTNAME)"
 	@echo "created dist/$(DISTNAME).tar.gz"
@@ -105,6 +106,24 @@ install: cgc
 	install -m 644 completions/_cgc "$(DESTDIR)$(ZSHCOMPDIR)/_cgc"
 	install -d "$(DESTDIR)$(FISHCOMPDIR)"
 	install -m 644 completions/cgc.fish "$(DESTDIR)$(FISHCOMPDIR)/cgc.fish"
+	@if [ -z "$(DESTDIR)" ]; then \
+		case "$(patsubst %/,%,$(PREFIX))" in \
+		/usr|/usr/local) ;; \
+		*) \
+			echo ""; \
+			echo "cgc was installed under $(PREFIX)."; \
+			echo "  man:  add $(MANROOT) to MANPATH"; \
+			echo "  zsh:  add $(ZSHCOMPDIR) to fpath"; \
+			echo "  bash: $(BASHCOMPDIR)"; \
+			echo "  fish: $(FISHCOMPDIR)"; \
+			echo "  Or run 'make install-shell PREFIX=$(PREFIX)' to configure these for your user."; \
+			echo ""; \
+			;; \
+		esac; \
+	fi
+
+install-shell:
+	MANDIR="$(MANDIR)" ./scripts/install-shell.sh
 
 uninstall:
 	rm -f "$(DESTDIR)$(BINDIR)/cgc"
@@ -119,4 +138,4 @@ clean:
 distclean: clean
 	rm -rf dist
 
-.PHONY: all analyze check clean dist distclean features install test uninstall
+.PHONY: all analyze check clean dist distclean features install install-check install-shell network test uninstall

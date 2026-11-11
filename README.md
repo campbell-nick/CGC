@@ -52,8 +52,10 @@ cd Hello-World
 ```
 
 Install with `make install` (supports `PREFIX` and `DESTDIR`), which also
-installs bash, zsh, and fish completions. Build a release tarball with
-`make dist`. The version is tracked in `VERSION`.
+installs bash, zsh, and fish completions. For a per-user install such as
+`PREFIX="$HOME/.local"`, `make install-shell PREFIX="$HOME/.local"` configures
+`MANPATH`, the zsh `fpath`, and user completion directories idempotently. Build a release tarball
+with `make dist`. The version is tracked in `VERSION`.
 
 Verified against GitHub and against `git http-backend` with repositories that
 contain branches, annotated tags, nested trees, symlinks, executables and

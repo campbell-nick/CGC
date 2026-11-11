@@ -42,14 +42,32 @@ make uninstall
 `$(PREFIX)/share/bash-completion/completions`,
 `$(PREFIX)/share/zsh/site-functions`, and
 `$(PREFIX)/share/fish/vendor_completions.d`. Override `BASHCOMPDIR`,
-`ZSHCOMPDIR`, or `FISHCOMPDIR` for a different layout. After installing,
-`man cgc` shows the manual page.
+`ZSHCOMPDIR`, or `FISHCOMPDIR` for a different layout.
+
+For a system prefix such as `/usr` or `/usr/local`, the manual page and
+completions are already in the standard search paths. For a per-user prefix
+such as `$HOME/.local`, `make install` prints the directories to add to
+`MANPATH` and the shell completion paths. After installing, `man cgc` shows
+the manual page. The optional `make install-shell` target sets this up
+automatically and idempotently:
+
+```sh
+make install PREFIX="$HOME/.local"
+make install-shell PREFIX="$HOME/.local"
+```
+
+It writes a managed block to `~/.zshenv`, `~/.bashrc`, and
+`~/.config/fish/config.fish`, adds the manual directory to `MANPATH`, adds the
+zsh completion directory to `fpath`, and installs completions under the user's
+XDG directories. It does not edit the files outside its marked block, and
+running it again replaces the block instead of duplicating it. Start a new
+shell afterwards.
 
 ## Tests
 
 ```sh
 make check         # unit, pack round-trip, and completion syntax (no network)
-make install-check # staged install and uninstall
+make install-check # staged install, man discovery, and shell integration
 make network       # timeouts, retries, proxy use and bypass (local servers)
 make features      # comprehensive end-to-end feature matrix
 make test          # all of the above, plus smoke and feature tests
@@ -70,6 +88,12 @@ make test          # all of the above, plus smoke and feature tests
 stalled server times out, that transient 503 responses are retried, that the
 error report includes the status, hint, and server message, and that HTTP
 proxies, proxy credentials, `ALL_PROXY`, and `NO_PROXY` work.
+
+`tests/install.sh` stages an install with `DESTDIR`, checks that `man` can find
+the staged page through `MANPATH`, verifies the non-system-prefix hints, and
+runs `make install-shell` against a temporary `HOME`. It confirms the managed
+blocks are applied and remain idempotent, and that the zsh and bash blocks
+take effect.
 
 `make test` additionally runs `tests/smoke.sh`, which generates a repository
 with history, deltas, branches, annotated and lightweight tags, a symlink, an

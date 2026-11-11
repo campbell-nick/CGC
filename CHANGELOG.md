@@ -96,8 +96,15 @@ All notable changes to this project are documented here. The format follows
   from the server.
 - Bash, zsh, and fish completions under `completions/`, installed by
   `make install` into the standard completion directories.
-- End-to-end coverage for timeouts, retries, proxy use and bypass, and
-  `make install`/`uninstall` staging.
+- `make install` prints `MANPATH` and completion hints when `PREFIX` is not a
+  system path such as `/usr` or `/usr/local`.
+- An optional `make install-shell` target that adds the manual directory to
+  `MANPATH`, adds the zsh completion directory to `fpath`, sources the bash
+  completion, and installs user completions. It writes an idempotent managed
+  block to the zsh, bash, and fish startup files.
+- End-to-end coverage for timeouts, retries, proxy use and bypass,
+  `make install`/`uninstall` staging, man-page discovery, and shell
+  integration.
 
 ### Changed
 
