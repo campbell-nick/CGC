@@ -31,7 +31,7 @@ static void usage(FILE *out)
             "  https://host/owner/repo   explicit URL       gh:owner/repo    GitHub\n"
             "  /path or file:///path     local repository   gl:owner/repo    GitLab\n"
             "  owner/repo                default host       bb:owner/repo    Bitbucket\n"
-            "  host.tld/owner/repo       explicit host      sym:owner/repo   symlinx\n"
+            "  host.tld/owner/repo       explicit host\n"
             "\n"
             "options:\n"
             "  -b, --branch <name>    branch to check out (default: remote HEAD)\n"

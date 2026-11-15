@@ -7,7 +7,7 @@ CPPFLAGS ?=
 LDFLAGS  ?=
 LDLIBS   ?=
 
-VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.1.0)
+VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.2.0)
 
 STDFLAGS  := -std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700
 WARNFLAGS := -Wall -Wextra -Wno-unused-parameter

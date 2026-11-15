@@ -174,7 +174,6 @@ All notable changes to this project are documented here. The format follows
   written to `.git/config`.
 - Git-style clone status: `Cloning into`, `remote:` lines, `Receiving objects`,
   `Resolving deltas`, and `Updating files`.
-- `sym:` shorthand for `git.symlinx.net`.
 - Man page (`cgc.1`).
 - Configurable `make install` with `PREFIX`, `DESTDIR`, and `make uninstall`.
 - Focused documentation under `docs/`.

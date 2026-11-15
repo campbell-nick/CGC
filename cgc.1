@@ -76,10 +76,6 @@ Expands to
 Expands to
 .BR https://bitbucket.org/\fIowner\fR/\fIrepo\fR.git .
 .TP
-.B sym:\fIowner\fR/\fIrepo\fR
-Expands to
-.BR https://git.symlinx.net/\fIowner\fR/\fIrepo\fR.git .
-.TP
 .B \fIowner\fR/\fIrepo\fR
 Expands to
 .BR https://\fIdefault-host\fR/\fIowner\fR/\fIrepo\fR.git .
@@ -322,7 +318,6 @@ Treat all remaining arguments as positional, even if they begin with a dash.
 .SH EXAMPLES
 .nf
 cgc gh:octocat/Hello-World
-cgc sym:team/repo
 cgc octocat/Hello-World my-copy
 cgc https://github.com/torvalds/linux.git
 cgc \-\-host git.example.com team/repo

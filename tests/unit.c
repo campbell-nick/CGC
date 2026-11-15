@@ -70,8 +70,6 @@ static void test_url_resolve(void)
          "https://gitlab.com/owner/repo.git", "repo"},
         {"bb:owner/repo", "github.com",
          "https://bitbucket.org/owner/repo.git", "repo"},
-        {"sym:owner/repo", "github.com",
-         "https://git.symlinx.net/owner/repo.git", "repo"},
         {"owner/repo", "github.com",
          "https://github.com/owner/repo.git", "repo"},
         {"owner/repo", "git.example.com",

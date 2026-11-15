@@ -27,7 +27,6 @@ int url_is_local(const char *url);
  *   gh:owner/repo      -> https://github.com/owner/repo.git
  *   gl:owner/repo      -> https://gitlab.com/owner/repo.git
  *   bb:owner/repo      -> https://bitbucket.org/owner/repo.git
- *   sym:owner/repo     -> https://git.symlinx.net/owner/repo.git
  *   owner/repo         -> https://<default_host>/owner/repo.git
  *   host.tld/owner/repo-> https://host.tld/owner/repo.git
  * Returns 0 on success; *out_url and *out_name are malloc'd. */

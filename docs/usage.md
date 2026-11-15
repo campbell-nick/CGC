@@ -18,7 +18,6 @@ suffix, matching `git clone --bare`.
 | `gh:owner/repo` | `https://github.com/owner/repo.git` |
 | `gl:owner/repo` | `https://gitlab.com/owner/repo.git` |
 | `bb:owner/repo` | `https://bitbucket.org/owner/repo.git` |
-| `sym:owner/repo` | `https://git.symlinx.net/owner/repo.git` |
 | `owner/repo` | `https://<default-host>/owner/repo.git` |
 | `host.tld/owner/repo` | `https://host.tld/owner/repo.git` |
 
@@ -34,7 +33,6 @@ a `.git` directory or `.git` file (linked worktrees), bare repositories, and
 
 ```sh
 cgc gh:octocat/Hello-World
-cgc sym:team/repo
 cgc octocat/Hello-World my-copy
 cgc https://github.com/torvalds/linux.git
 cgc --host git.example.com team/repo
