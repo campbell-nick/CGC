@@ -29,8 +29,9 @@ Besides smart HTTP, `cgc` clones and fetches from local repositories by reading
 their refs and objects directly, including bare repositories, `file://` URLs,
 and linked worktrees. It never invokes `git`.
 
-Network requests have configurable timeouts (`CGC_HTTP_TIMEOUT`) and retry
-transient `GET`/`HEAD` failures (`CGC_HTTP_RETRIES`). HTTP and HTTPS proxies are
+Network requests have configurable timeouts (`CGC_HTTP_TIMEOUT`), retry
+transient `GET`/`HEAD` failures, and retry connection and TLS handshake
+failures for every method (`CGC_HTTP_RETRIES`). HTTP and HTTPS proxies are
 honored through `http_proxy`, `https_proxy`, `all_proxy`, and `NO_PROXY`,
 including proxy credentials and `CONNECT` tunnelling. Self-contained packs
 received over HTTP are kept as `objects/pack/pack-<sha>.pack` with a v2 `.idx`;

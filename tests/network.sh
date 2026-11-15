@@ -56,7 +56,8 @@ wait_port() {
 # Run cgc with a clean proxy environment, then add the given variables.
 run_cgc() {
     env -u http_proxy -u HTTP_PROXY -u https_proxy -u HTTPS_PROXY \
-        -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY "$@"
+        -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY \
+        -u CGC_HTTP_TIMEOUT -u CGC_HTTP_RETRIES "$@"
 }
 
 PORT=$((11000 + RANDOM % 400))
@@ -81,6 +82,41 @@ BASE="http://127.0.0.1:$PORT/repo.git"
 # Baseline: direct clone.
 run_cgc "$ROOT/cgc" -q "$BASE" "$WORK/direct"
 git -C "$WORK/direct" fsck --full
+
+# Connection failures happen before a request is sent, so they are retried.
+# Start the server after the first few attempts have already been refused.
+LATE_PORT=$((PORT + 2000))
+(
+    sleep 1.2
+    exec env FLAKY_FAILS=1 python3 "$ROOT/tests/serve-http.py" \
+        "$WORK/server" "$LATE_PORT" length >/dev/null 2>&1
+) &
+PIDS+=($!)
+if ! run_cgc "$ROOT/cgc" -q "http://127.0.0.1:$LATE_PORT/repo.git" \
+        "$WORK/late" 2>"$WORK/late.err"; then
+    cat "$WORK/late.err" >&2
+    exit 1
+fi
+git -C "$WORK/late" fsck --full
+if [ -s "$WORK/late.err" ]; then
+    echo "network: retries printed warnings after succeeding" >&2
+    cat "$WORK/late.err" >&2
+    exit 1
+fi
+
+# Once retries are exhausted, the connection error is reported exactly once.
+CLOSED_PORT=$((PORT + 2400))
+if run_cgc CGC_HTTP_RETRIES=2 "$ROOT/cgc" -q \
+        "http://127.0.0.1:$CLOSED_PORT/repo.git" "$WORK/closed" \
+        2>"$WORK/closed.err"; then
+    echo "network: closed port unexpectedly succeeded" >&2
+    exit 1
+fi
+if [ "$(grep -c 'cannot connect' "$WORK/closed.err" || true)" -ne 1 ]; then
+    echo "network: expected one connection warning" >&2
+    cat "$WORK/closed.err" >&2
+    exit 1
+fi
 
 # A stalled server must time out instead of hanging forever.
 start=$(date +%s)

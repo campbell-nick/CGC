@@ -9,6 +9,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,9 +39,38 @@ void http_set_token(const char *token)
     g_http_token = token && *token ? xstrdup(token) : NULL;
 }
 
+/*
+ * Connection and TLS failures are buffered instead of printed immediately.
+ * Retries would otherwise repeat the same warning several times even when a
+ * later attempt succeeds; the request loop emits the message only when it
+ * gives up.
+ */
+static char g_conn_error[512];
+
+static void conn_error_clear(void)
+{
+    g_conn_error[0] = '\0';
+}
+
+static void conn_error(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_conn_error, sizeof(g_conn_error), fmt, ap);
+    va_end(ap);
+}
+
+static void conn_error_emit(void)
+{
+    if (g_conn_error[0])
+        warn_cgc("%s", g_conn_error);
+}
+
 #define HTTP_DEFAULT_TIMEOUT_SECONDS 60
 #define HTTP_DEFAULT_RETRIES 2
+#define HTTP_DEFAULT_CONNECT_RETRIES 5
 #define HTTP_MAX_RETRY_DELAY_MS 4000
+#define HTTP_MAX_CONNECT_RETRY_DELAY_MS 1000
 
 static long env_long(const char *name, long def, long min, long max)
 {
@@ -65,6 +95,20 @@ static int http_timeout_ms(void)
 static int http_retries(void)
 {
     return (int)env_long("CGC_HTTP_RETRIES", HTTP_DEFAULT_RETRIES, 0, 10);
+}
+
+/*
+ * Connection and TLS failures are retried more aggressively than HTTP status
+ * errors. They are cheap, happen before a request is sent, and re-resolving
+ * the host on each attempt often reaches a working address. An explicit
+ * CGC_HTTP_RETRIES keeps its meaning for both kinds of retry.
+ */
+static int http_connect_retries(void)
+{
+    const char *s = getenv("CGC_HTTP_RETRIES");
+    if (s && *s)
+        return http_retries();
+    return HTTP_DEFAULT_CONNECT_RETRIES;
 }
 
 typedef struct {
@@ -273,6 +317,22 @@ static void set_socket_timeouts(int fd)
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
+static int connect_errno_is_transient(int err)
+{
+    switch (err) {
+    case ETIMEDOUT:
+    case ECONNRESET:
+    case ECONNREFUSED:
+    case EHOSTUNREACH:
+    case ENETUNREACH:
+    case EADDRNOTAVAIL:
+    case EPIPE:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int tcp_connect(const char *host, int port)
 {
     char portstr[16];
@@ -286,8 +346,8 @@ static int tcp_connect(const char *host, int port)
     struct addrinfo *res = NULL;
     int rc = getaddrinfo(host, portstr, &hints, &res);
     if (rc != 0) {
-        warn_cgc("cannot resolve %s: %s", host, gai_strerror(rc));
-        return -1;
+        conn_error("cannot resolve %s: %s", host, gai_strerror(rc));
+        return rc == EAI_AGAIN ? -2 : -1;
     }
 
     int fd = -1;
@@ -341,10 +401,12 @@ static int tcp_connect(const char *host, int port)
     }
     freeaddrinfo(res);
     if (fd < 0) {
-        if (errno == ETIMEDOUT)
-            warn_cgc("timed out connecting to %s:%d", host, port);
+        int err = errno;
+        if (err == ETIMEDOUT)
+            conn_error("timed out connecting to %s:%d", host, port);
         else
-            warn_cgc("cannot connect to %s:%d: %s", host, port, strerror(errno));
+            conn_error("cannot connect to %s:%d: %s", host, port, strerror(err));
+        return connect_errno_is_transient(err) ? -2 : -1;
     }
     return fd;
 }
@@ -359,40 +421,67 @@ static ssize_t conn_read(Conn *c, void *buf, size_t len);
 static int conn_write_all(Conn *c, const void *data, size_t len);
 static int proxy_connect(Conn *c, const Url *u, const Proxy *p);
 
+/*
+ * Describe why SSL_connect failed. A reset during the handshake leaves errno
+ * set but often has no OpenSSL error queued, so fall back to strerror().
+ * Certificate problems are permanent; handshake failures are transient.
+ */
+static int tls_handshake_error(const Url *u, SSL *ssl, int ret)
+{
+    long vr = SSL_get_verify_result(ssl);
+    if (vr != X509_V_OK) {
+        conn_error("TLS certificate verification failed for %s: %s",
+                   u->host, X509_verify_cert_error_string(vr));
+        return -1;
+    }
+
+    int err = SSL_get_error(ssl, ret);
+    unsigned long queued = ERR_get_error();
+    if (queued) {
+        char buf[256];
+        ERR_error_string_n(queued, buf, sizeof(buf));
+        conn_error("TLS handshake with %s failed: %s", u->host, buf);
+    } else if (err == SSL_ERROR_SYSCALL && errno != 0) {
+        conn_error("TLS handshake with %s failed: %s", u->host, strerror(errno));
+    } else if (err == SSL_ERROR_SYSCALL) {
+        conn_error("TLS handshake with %s failed: connection closed by peer",
+                   u->host);
+    } else {
+        conn_error("TLS handshake with %s failed (SSL error %d)", u->host, err);
+    }
+    return -2;
+}
+
 static int tls_start(Conn *c, const Url *u)
 {
     c->ctx = SSL_CTX_new(TLS_client_method());
     if (!c->ctx) {
-        warn_cgc("cannot create TLS context");
+        conn_error("cannot create TLS context");
         return -1;
     }
     SSL_CTX_set_min_proto_version(c->ctx, TLS1_2_VERSION);
     SSL_CTX_set_verify(c->ctx, SSL_VERIFY_PEER, NULL);
     if (!SSL_CTX_set_default_verify_paths(c->ctx)) {
-        warn_cgc("cannot load system CA certificates");
+        conn_error("cannot load system CA certificates");
         return -1;
     }
 
     c->ssl = SSL_new(c->ctx);
     if (!c->ssl) {
-        warn_cgc("cannot create TLS session");
+        conn_error("cannot create TLS session");
         return -1;
     }
     SSL_set_fd(c->ssl, c->fd);
     SSL_set_tlsext_host_name(c->ssl, u->host);
     SSL_set1_host(c->ssl, u->host);
 
-    if (SSL_connect(c->ssl) != 1) {
-        long vr = SSL_get_verify_result(c->ssl);
-        if (vr != X509_V_OK)
-            warn_cgc("TLS certificate verification failed: %s",
-                     X509_verify_cert_error_string(vr));
-        else
-            warn_cgc("TLS handshake with %s failed", u->host);
-        return -1;
-    }
+    ERR_clear_error();
+    errno = 0;
+    int ret = SSL_connect(c->ssl);
+    if (ret != 1)
+        return tls_handshake_error(u, c->ssl, ret);
     if (SSL_get_verify_result(c->ssl) != X509_V_OK) {
-        warn_cgc("TLS certificate verification failed for %s", u->host);
+        conn_error("TLS certificate verification failed for %s", u->host);
         return -1;
     }
     return 0;
@@ -405,10 +494,11 @@ static int conn_open(Conn *c, const Url *u, const Proxy *p)
     if (p->enabled) {
         c->fd = tcp_connect(p->host, p->port);
         if (c->fd < 0)
-            return -1;
+            return c->fd;
         if (strcmp(u->scheme, "https") == 0) {
-            if (proxy_connect(c, u, p) != 0)
-                return -1;
+            int rc = proxy_connect(c, u, p);
+            if (rc != 0)
+                return rc;
             return tls_start(c, u);
         }
         return 0;
@@ -416,7 +506,7 @@ static int conn_open(Conn *c, const Url *u, const Proxy *p)
 
     c->fd = tcp_connect(u->host, u->port);
     if (c->fd < 0)
-        return -1;
+        return c->fd;
     if (strcmp(u->scheme, "https") != 0)
         return 0;
     return tls_start(c, u);
@@ -516,8 +606,8 @@ static int proxy_connect(Conn *c, const Url *u, const Proxy *p)
     int rc = conn_write_all(c, req.data, req.len);
     buf_free(&req);
     if (rc != 0) {
-        warn_cgc("failed to send CONNECT to proxy %s:%d", p->host, p->port);
-        return -1;
+        conn_error("failed to send CONNECT to proxy %s:%d", p->host, p->port);
+        return -2;
     }
 
     char header[8192];
@@ -525,9 +615,9 @@ static int proxy_connect(Conn *c, const Url *u, const Proxy *p)
     while (len < sizeof(header) - 1) {
         ssize_t n = conn_read(c, header + len, 1);
         if (n <= 0) {
-            warn_cgc("proxy %s:%d closed the connection during CONNECT",
-                     p->host, p->port);
-            return -1;
+            conn_error("proxy %s:%d closed the connection during CONNECT",
+                       p->host, p->port);
+            return -2;
         }
         len++;
         header[len] = 0;
@@ -535,19 +625,19 @@ static int proxy_connect(Conn *c, const Url *u, const Proxy *p)
             break;
     }
     if (len < 4 || memcmp(header + len - 4, "\r\n\r\n", 4) != 0) {
-        warn_cgc("proxy response is too large");
+        conn_error("proxy response is too large");
         return -1;
     }
 
     char *sp = strchr(header, ' ');
     int status = 0;
     if (!sp || sscanf(sp + 1, "%d", &status) != 1) {
-        warn_cgc("malformed response from proxy %s:%d", p->host, p->port);
+        conn_error("malformed response from proxy %s:%d", p->host, p->port);
         return -1;
     }
     if (status != 200) {
-        warn_cgc("proxy CONNECT to %s:%d failed with HTTP %d",
-                 u->host, u->port, status);
+        conn_error("proxy CONNECT to %s:%d failed with HTTP %d",
+                   u->host, u->port, status);
         return -1;
     }
     return 0;
@@ -782,6 +872,8 @@ static int request_once(const char *method, const char *url,
                         http_body_fn on_body, void *ud,
                         HttpResponse *resp)
 {
+    conn_error_clear();
+
     Url u;
     if (url_parse(url, &u) != 0) {
         warn_cgc("invalid URL: %s", url);
@@ -792,11 +884,13 @@ static int request_once(const char *method, const char *url,
     proxy_for(&u, &proxy);
 
     Conn c;
-    if (conn_open(&c, &u, &proxy) != 0) {
+    int open_rc = conn_open(&c, &u, &proxy);
+    if (open_rc != 0) {
         conn_close(&c);
         proxy_free(&proxy);
         url_free(&u);
-        return -1;
+        /* No request bytes were sent, so even a POST can be retried safely. */
+        return open_rc;
     }
 
     int default_port = strcmp(u.scheme, "https") == 0 ? 443 : 80;
@@ -1012,10 +1106,12 @@ static int do_request(const char *method, const char *url,
     for (int redirects = 0; redirects <= 5; redirects++) {
         HttpResponse r;
         memset(&r, 0, sizeof(r));
-        if (request_once(cur_method, current, content_type,
-                         cur_body, cur_bodylen, extra_headers,
-                         on_body, ud, &r) != 0) {
+        int once = request_once(cur_method, current, content_type,
+                                cur_body, cur_bodylen, extra_headers,
+                                on_body, ud, &r);
+        if (once != 0) {
             http_response_free(&r);
+            rc = once;
             goto out;
         }
 
@@ -1123,16 +1219,27 @@ void http_warn_status(const HttpResponse *r, const char *action)
     warn_error_body(r);
 }
 
-static void retry_sleep(int attempt)
+static void retry_sleep_ms(long ms, long cap)
 {
-    long ms = 250L << (attempt < 4 ? attempt : 4);
-    if (ms > HTTP_MAX_RETRY_DELAY_MS)
-        ms = HTTP_MAX_RETRY_DELAY_MS;
+    if (ms > cap)
+        ms = cap;
     struct timespec ts;
     ts.tv_sec = ms / 1000;
     ts.tv_nsec = (ms % 1000) * 1000000L;
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR && !cgc_interrupted)
         ;
+}
+
+static void retry_sleep(int attempt)
+{
+    retry_sleep_ms(250L << (attempt < 4 ? attempt : 4),
+                   HTTP_MAX_RETRY_DELAY_MS);
+}
+
+static void connect_retry_sleep(int attempt)
+{
+    retry_sleep_ms(100L << (attempt < 4 ? attempt : 4),
+                   HTTP_MAX_CONNECT_RETRY_DELAY_MS);
 }
 
 int http_request(const char *method, const char *url,
@@ -1142,7 +1249,8 @@ int http_request(const char *method, const char *url,
                  HttpResponse *resp)
 {
     int retryable = strcmp(method, "GET") == 0 || strcmp(method, "HEAD") == 0;
-    int retries = retryable ? http_retries() : 0;
+    int status_retries = http_retries();
+    int connect_retries = http_connect_retries();
 
     for (int attempt = 0;; attempt++) {
         int rc = do_request(method, url, content_type, body, bodylen,
@@ -1151,13 +1259,28 @@ int http_request(const char *method, const char *url,
             int transient = resp->status == 408 || resp->status == 429 ||
                             resp->status == 500 || resp->status == 502 ||
                             resp->status == 503 || resp->status == 504;
-            if (!transient || attempt >= retries)
+            if (!retryable || !transient || attempt >= status_retries)
                 return 0;
             http_response_free(resp);
-        } else if (attempt >= retries || cgc_interrupted) {
-            return -1;
+            retry_sleep(attempt);
+        } else if (rc == -2) {
+            /* No request bytes were sent, so even a POST is safe to retry. */
+            if (attempt >= connect_retries || cgc_interrupted) {
+                conn_error_emit();
+                return -1;
+            }
+            connect_retry_sleep(attempt);
+        } else {
+            /*
+             * The request may have reached the server. Only idempotent
+             * methods may be retried after this point.
+             */
+            if (!retryable || attempt >= status_retries || cgc_interrupted) {
+                conn_error_emit();
+                return -1;
+            }
+            retry_sleep(attempt);
         }
-        retry_sleep(attempt);
     }
 }
 
@@ -1168,6 +1291,18 @@ int http_request_stream(const char *method, const char *url,
                         http_body_fn on_body, void *ud,
                         HttpResponse *resp)
 {
-    return do_request(method, url, content_type, body, bodylen,
-                      extra_headers, on_body, ud, resp);
+    int retries = http_connect_retries();
+
+    for (int attempt = 0;; attempt++) {
+        int rc = do_request(method, url, content_type, body, bodylen,
+                            extra_headers, on_body, ud, resp);
+        /* A connection failure sends no request bytes, so streaming POSTs
+         * can be retried too. Anything after that may have delivered data. */
+        if (rc != -2 || attempt >= retries || cgc_interrupted) {
+            if (rc != 0)
+                conn_error_emit();
+            return rc;
+        }
+        connect_retry_sleep(attempt);
+    }
 }

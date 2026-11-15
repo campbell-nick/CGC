@@ -86,7 +86,9 @@ All notable changes to this project are documented here. The format follows
   clone or fetch forever.
 - Automatic retries for idempotent `GET` and `HEAD` requests on transient
   failures (408, 429, 500, 502, 503, 504), configurable with
-  `CGC_HTTP_RETRIES` (default 2).
+  `CGC_HTTP_RETRIES` (default 2). Connection and TLS handshake failures are
+  retried for every method, including POST and streaming fetches, because no
+  request bytes are sent before the failure.
 - HTTP and HTTPS proxy support through `http_proxy`/`HTTP_PROXY`,
   `https_proxy`/`HTTPS_PROXY`, `all_proxy`/`ALL_PROXY`, and `NO_PROXY`/
   `no_proxy`, including `CONNECT` tunnelling and proxy authentication from
@@ -135,6 +137,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Connection and TLS handshake failures are retried before a request is sent,
+  including for POST and streaming fetches, with up to five retries by default
+  and a shorter backoff. Each attempt resolves the host again, which avoids
+  getting stuck on a failing address. Intermediate attempts stay quiet, so a
+  retry that succeeds does not print a warning. TLS errors now report the
+  OpenSSL or system error, such as `Connection reset by peer`, instead of only
+  the host name.
 - Mirror clones and fetches now copy refs outside `refs/heads` and `refs/tags`,
   notably `refs/notes/*`, over HTTP, local paths, and protocol v0.
 - Local transport lists arbitrary refs under `refs/` when a mirror or a custom
