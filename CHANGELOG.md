@@ -89,6 +89,10 @@ All notable changes to this project are documented here. The format follows
   `CGC_HTTP_RETRIES` (default 2). Connection and TLS handshake failures are
   retried for every method, including POST and streaming fetches, because no
   request bytes are sent before the failure.
+- Clone, fetch, and pull retry the whole network operation when a transfer
+  fails after the request was sent, such as a reset while receiving refs or a
+  pack. Intermediate attempts stay quiet, and `CGC_HTTP_RETRIES` controls both
+  per-request and operation retries; `0` disables them.
 - HTTP and HTTPS proxy support through `http_proxy`/`HTTP_PROXY`,
   `https_proxy`/`HTTPS_PROXY`, `all_proxy`/`ALL_PROXY`, and `NO_PROXY`/
   `no_proxy`, including `CONNECT` tunnelling and proxy authentication from

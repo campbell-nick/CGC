@@ -28,8 +28,9 @@ git clone -q --bare "$WORK/src" "$WORK/server/repo.git"
 git -C "$WORK/server/repo.git" symbolic-ref HEAD refs/heads/main
 
 start_server() {
-    local port=$1 mode=${2:-length} fails=${3:-1}
-    FLAKY_FAILS=$fails python3 "$ROOT/tests/serve-http.py" \
+    local port=$1 mode=${2:-length} fails=${3:-1} skip=${4:-0}
+    FLAKY_FAILS=$fails FLAKY_SKIP=$skip \
+        python3 "$ROOT/tests/serve-http.py" \
         "$WORK/server" "$port" "$mode" >/dev/null 2>&1 &
     PIDS+=($!)
 }
@@ -65,15 +66,22 @@ FLAKY_PORT=$((PORT + 400))
 FLAKY_FAIL_PORT=$((PORT + 800))
 STALL_PORT=$((PORT + 1200))
 PROXY_PORT=$((PORT + 1600))
+TRUNC_PORT=$((PORT + 2800))
+TRUNC_PULL_PORT=$((PORT + 3200))
+TRUNC_OFF_PORT=$((PORT + 3600))
 
 start_server "$PORT" length
 start_server "$FLAKY_PORT" flaky 1
 start_server "$FLAKY_FAIL_PORT" flaky 1
 start_server "$STALL_PORT" stall
+start_server "$TRUNC_PORT" truncate-post 1 0
+start_server "$TRUNC_PULL_PORT" truncate-post 1 1
+start_server "$TRUNC_OFF_PORT" truncate-post 1 0
 start_proxy "$PROXY_PORT"
 
 for port in "$PORT" "$FLAKY_PORT" "$FLAKY_FAIL_PORT" "$STALL_PORT" \
-            "$PROXY_PORT"; do
+            "$PROXY_PORT" "$TRUNC_PORT" "$TRUNC_PULL_PORT" \
+            "$TRUNC_OFF_PORT"; do
     wait_port "$port" || { echo "network: port $port did not open" >&2; exit 1; }
 done
 
@@ -178,5 +186,33 @@ run_cgc http_proxy="http://127.0.0.1:$PROXY_PORT" \
     no_proxy="example.com, 127.0.0.1:$PORT" \
     "$ROOT/cgc" -q "$BASE" "$WORK/noproxy-port"
 git -C "$WORK/noproxy-port" fsck --full
+
+# A failure after the request was sent cannot be retried inside the HTTP
+# layer, so clone retries the whole ref-listing operation.
+run_cgc "$ROOT/cgc" -q "http://127.0.0.1:$TRUNC_PORT/repo.git" \
+    "$WORK/truncated"
+git -C "$WORK/truncated" fsck --full
+
+# Pull retries a truncated pack transfer. Skip the ref-listing POST so the
+# failure happens during the fetch itself.
+run_cgc "$ROOT/cgc" -q "$BASE" "$WORK/pull-retry"
+printf 'second commit\n' > "$WORK/src/second.txt"
+git -C "$WORK/src" add -A
+git -C "$WORK/src" commit -q -m second
+git -C "$WORK/src" push -q "$WORK/server/repo.git" main
+git -C "$WORK/pull-retry" remote set-url origin \
+    "http://127.0.0.1:$TRUNC_PULL_PORT/repo.git"
+run_cgc "$ROOT/cgc" pull -q "$WORK/pull-retry"
+test -f "$WORK/pull-retry/second.txt"
+git -C "$WORK/pull-retry" fsck --full
+
+# CGC_HTTP_RETRIES=0 disables whole-operation retries as well.
+if run_cgc CGC_HTTP_RETRIES=0 "$ROOT/cgc" -q \
+        "http://127.0.0.1:$TRUNC_OFF_PORT/repo.git" "$WORK/trunc-off" \
+        2>"$WORK/trunc-off.err"; then
+    echo "network: truncated response was not reported as a failure" >&2
+    exit 1
+fi
+grep -qi 'truncated\|malformed response' "$WORK/trunc-off.err"
 
 echo "network test passed"

@@ -170,6 +170,13 @@ are retried for every method, including the POST requests used for fetches. Up
 to five retries (the default) use a shorter backoff, and each attempt resolves
 the host again. Setting `CGC_HTTP_RETRIES` overrides both retry counts.
 
+Some failures happen after the request has already been sent, such as a
+connection reset while receiving the ref advertisement or a pack. The HTTP
+layer cannot safely resume those transfers, so `cgc` repeats the whole clone,
+fetch, or pull operation instead, up to `CGC_HTTP_RETRIES` times (default 2).
+Intermediate attempts stay quiet; the transport error is reported only if
+every attempt fails. Setting `CGC_HTTP_RETRIES=0` disables all retries.
+
 `cgc` honors `http_proxy`/`HTTP_PROXY`, `https_proxy`/`HTTPS_PROXY`, and
 `all_proxy`/`ALL_PROXY`. Proxy URLs may include credentials
 (`http://user:password@proxy:8080`); HTTPS requests are tunnelled through the

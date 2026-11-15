@@ -44,4 +44,19 @@ int http_request_stream(const char *method, const char *url,
                         http_body_fn on_body, void *ud,
                         HttpResponse *resp);
 
+/* Whether the most recent request failed for a reason that may succeed if the
+ * whole operation is attempted again (reset, timeout, truncated response, or
+ * a transient HTTP status). Permanent failures such as certificate errors and
+ * 4xx responses return 0. */
+int http_last_error_transient(void);
+
+/* Print the buffered transport diagnostic for the last transient failure.
+ * Intermediate attempts stay quiet; callers emit this once when giving up. */
+void http_emit_transient_error(void);
+
+/* Retry budget and backoff for whole clone/fetch/pull operations. The count
+ * comes from CGC_HTTP_RETRIES and 0 disables operation retries. */
+int http_operation_retries(void);
+void http_operation_retry_sleep(int attempt);
+
 #endif

@@ -46,6 +46,36 @@ void http_set_token(const char *token)
  * gives up.
  */
 static char g_conn_error[512];
+static char g_transient_error[512];
+
+static void transient_warn(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_transient_error, sizeof(g_transient_error), fmt, ap);
+    va_end(ap);
+}
+
+void http_emit_transient_error(void)
+{
+    if (g_transient_error[0]) {
+        warn_cgc("%s", g_transient_error);
+        g_transient_error[0] = '\0';
+    }
+}
+
+/*
+ * Set when the most recent request failed for a reason that may go away on
+ * its own (connection reset, timeout, truncated body, transient HTTP status).
+ * Protocol callers use this to retry a whole clone/fetch/pull operation after
+ * a failure that happened once bytes were already on the wire.
+ */
+static int g_http_last_transient = 0;
+
+int http_last_error_transient(void)
+{
+    return g_http_last_transient;
+}
 
 static void conn_error_clear(void)
 {
@@ -71,6 +101,8 @@ static void conn_error_emit(void)
 #define HTTP_DEFAULT_CONNECT_RETRIES 5
 #define HTTP_MAX_RETRY_DELAY_MS 4000
 #define HTTP_MAX_CONNECT_RETRY_DELAY_MS 1000
+
+static void retry_sleep(int attempt);
 
 static long env_long(const char *name, long def, long min, long max)
 {
@@ -109,6 +141,23 @@ static int http_connect_retries(void)
     if (s && *s)
         return http_retries();
     return HTTP_DEFAULT_CONNECT_RETRIES;
+}
+
+/*
+ * A request can fail after the request body was sent (for example a reset
+ * while receiving refs or a pack). Those failures cannot be retried inside
+ * the HTTP layer because the caller's parser already consumed partial data,
+ * so clone/fetch/pull retry the whole network operation instead. The same
+ * CGC_HTTP_RETRIES knob controls both, and 0 disables all retries.
+ */
+int http_operation_retries(void)
+{
+    return http_retries();
+}
+
+void http_operation_retry_sleep(int attempt)
+{
+    retry_sleep(attempt);
 }
 
 typedef struct {
@@ -873,6 +922,8 @@ static int request_once(const char *method, const char *url,
                         HttpResponse *resp)
 {
     conn_error_clear();
+    g_transient_error[0] = '\0';
+    g_http_last_transient = 0;
 
     Url u;
     if (url_parse(url, &u) != 0) {
@@ -889,6 +940,8 @@ static int request_once(const char *method, const char *url,
         conn_close(&c);
         proxy_free(&proxy);
         url_free(&u);
+        /* -2 means a transient connect/TLS failure; -1 is permanent. */
+        g_http_last_transient = open_rc == -2;
         /* No request bytes were sent, so even a POST can be retried safely. */
         return open_rc;
     }
@@ -933,9 +986,10 @@ static int request_once(const char *method, const char *url,
 
     if (conn_write_all(&c, req.data, req.len) != 0) {
         if (errno == ETIMEDOUT)
-            warn_cgc("timed out sending request to %s", u.host);
+            transient_warn("timed out sending request to %s", u.host);
         else
-            warn_cgc("failed to send request to %s", u.host);
+            transient_warn("failed to send request to %s", u.host);
+        g_http_last_transient = 1;
         buf_free(&req);
         conn_close(&c);
         url_free(&u);
@@ -971,16 +1025,19 @@ static int request_once(const char *method, const char *url,
         ssize_t n = conn_read(&c, raw.data + raw.len, raw.cap - raw.len - 1);
         if (n < 0) {
             if (errno == ETIMEDOUT)
-                warn_cgc("timed out waiting for a response from %s", u.host);
+                transient_warn("timed out waiting for a response from %s",
+                               u.host);
             else
-                warn_cgc("error reading response from %s", u.host);
+                transient_warn("error reading response from %s", u.host);
+            g_http_last_transient = 1;
             failed = 1;
             break;
         }
 
         if (n == 0) {
             if (!hdr_end) {
-                warn_cgc("connection closed before HTTP headers arrived");
+                transient_warn("connection closed before HTTP headers arrived");
+                g_http_last_transient = 1;
                 failed = 1;
             }
             break;
@@ -999,8 +1056,9 @@ static int request_once(const char *method, const char *url,
             if (!line_end || !sp1 ||
                 sscanf(sp1 + 1, "%d", &status) != 1 ||
                 status < 100 || status > 599) {
-                warn_cgc("malformed HTTP response from %s", u.host);
+                transient_warn("malformed HTTP response from %s", u.host);
                 free(headers);
+                g_http_last_transient = 1;
                 failed = 1;
                 break;
             }
@@ -1048,7 +1106,8 @@ static int request_once(const char *method, const char *url,
         size_t have = raw.len - hdr_end;
         if (have > 0) {
             if (decoder_feed(&dec, raw.data + hdr_end, have) != 0) {
-                warn_cgc("malformed response body from %s", u.host);
+                transient_warn("malformed response body from %s", u.host);
+                g_http_last_transient = 1;
                 failed = 1;
                 break;
             }
@@ -1060,11 +1119,13 @@ static int request_once(const char *method, const char *url,
 
     if (!failed && hdr_end && !dec.done) {
         if (dec.chunked) {
-            warn_cgc("truncated chunked response from %s", u.host);
+            transient_warn("truncated chunked response from %s", u.host);
+            g_http_last_transient = 1;
             failed = 1;
         } else if (dec.content_length >= 0 &&
                    dec.body_seen < (size_t)dec.content_length) {
-            warn_cgc("truncated response from %s", u.host);
+            transient_warn("truncated response from %s", u.host);
+            g_http_last_transient = 1;
             failed = 1;
         }
     }
@@ -1252,6 +1313,7 @@ int http_request(const char *method, const char *url,
     int status_retries = http_retries();
     int connect_retries = http_connect_retries();
 
+    g_http_last_transient = 0;
     for (int attempt = 0;; attempt++) {
         int rc = do_request(method, url, content_type, body, bodylen,
                             extra_headers, NULL, NULL, resp);
@@ -1259,11 +1321,15 @@ int http_request(const char *method, const char *url,
             int transient = resp->status == 408 || resp->status == 429 ||
                             resp->status == 500 || resp->status == 502 ||
                             resp->status == 503 || resp->status == 504;
+            g_http_last_transient = transient;
             if (!retryable || !transient || attempt >= status_retries)
                 return 0;
             http_response_free(resp);
             retry_sleep(attempt);
         } else if (rc == -2) {
+            /* Connection and TLS failures are retried here already. Do not
+             * ask the caller to repeat the whole operation for them. */
+            g_http_last_transient = 0;
             /* No request bytes were sent, so even a POST is safe to retry. */
             if (attempt >= connect_retries || cgc_interrupted) {
                 conn_error_emit();
@@ -1293,14 +1359,22 @@ int http_request_stream(const char *method, const char *url,
 {
     int retries = http_connect_retries();
 
+    g_http_last_transient = 0;
     for (int attempt = 0;; attempt++) {
         int rc = do_request(method, url, content_type, body, bodylen,
                             extra_headers, on_body, ud, resp);
         /* A connection failure sends no request bytes, so streaming POSTs
          * can be retried too. Anything after that may have delivered data. */
         if (rc != -2 || attempt >= retries || cgc_interrupted) {
-            if (rc != 0)
+            if (rc != 0) {
+                if (rc == -2)
+                    g_http_last_transient = 0;
                 conn_error_emit();
+                return rc;
+            }
+            g_http_last_transient = resp->status == 408 || resp->status == 429 ||
+                                    resp->status == 500 || resp->status == 502 ||
+                                    resp->status == 503 || resp->status == 504;
             return rc;
         }
         connect_retry_sleep(attempt);

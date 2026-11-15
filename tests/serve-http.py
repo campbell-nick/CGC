@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Tiny smart-HTTP server backed by `git http-backend`, used by smoke.sh.
 
-usage: serve-http.py <git-project-root> <port> [length|chunked|v0|flaky|stall]
+usage: serve-http.py <git-project-root> <port>
+                     [length|chunked|v0|flaky|stall|truncate-post]
 
 The optional third argument selects how response bodies are framed. The
 default is Content-Length; "chunked" exercises cgc's chunked decoder, and
 "v0" hides the Git-Protocol header so git http-backend falls back to
 protocol v0. "flaky" returns 503 for the first FLAKY_FAILS requests (default
-1), and "stall" accepts the request but never responds, for timeout tests.
+1), "stall" accepts the request but never responds, for timeout tests, and
+"truncate-post" cuts off the first FLAKY_FAILS POST responses after
+FLAKY_SKIP successful POSTs, to exercise whole-operation retries after a
+transfer has already started.
 """
 import os
 import subprocess
@@ -20,8 +24,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.abspath(sys.argv[1])
 MODE = sys.argv[3] if len(sys.argv) > 3 else "length"
 FLAKY_FAILS = int(os.environ.get("FLAKY_FAILS", "1"))
+FLAKY_SKIP = int(os.environ.get("FLAKY_SKIP", "0"))
 _flaky_lock = threading.Lock()
 _flaky_left = FLAKY_FAILS
+_truncate_left = FLAKY_FAILS
+_truncate_skip = FLAKY_SKIP
 
 
 def flaky_fail():
@@ -29,6 +36,18 @@ def flaky_fail():
     with _flaky_lock:
         if _flaky_left > 0:
             _flaky_left -= 1
+            return True
+        return False
+
+
+def truncate_post():
+    global _truncate_left, _truncate_skip
+    with _flaky_lock:
+        if _truncate_skip > 0:
+            _truncate_skip -= 1
+            return False
+        if _truncate_left > 0:
+            _truncate_left -= 1
             return True
         return False
 
@@ -63,6 +82,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+            return
+        if (MODE == "truncate-post" and self.command == "POST" and
+                truncate_post()):
+            # Announce more bytes than are sent, then close the connection.
+            # This fails after the request was delivered, which is the case
+            # whole-operation retries are meant to handle.
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "application/x-git-upload-pack-result")
+            self.send_header("Content-Length", "1024")
+            self.end_headers()
+            self.wfile.write(b"0008")
+            self.close_connection = True
             return
 
         u = urllib.parse.urlparse(self.path)
@@ -124,7 +156,8 @@ if __name__ == "__main__":
     if len(sys.argv) not in (3, 4):
         sys.exit("usage: serve-http.py <git-project-root> <port> "
                  "[length|chunked|v0|flaky|stall]")
-    if MODE not in ("length", "chunked", "v0", "flaky", "stall"):
+    if MODE not in ("length", "chunked", "v0", "flaky", "stall",
+                    "truncate-post"):
         sys.exit("serve-http.py: mode must be length, chunked, v0, flaky, "
-                 "or stall")
+                 "stall, or truncate-post")
     ThreadingHTTPServer(("127.0.0.1", int(sys.argv[2])), Handler).serve_forever()

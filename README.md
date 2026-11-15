@@ -31,7 +31,9 @@ and linked worktrees. It never invokes `git`.
 
 Network requests have configurable timeouts (`CGC_HTTP_TIMEOUT`), retry
 transient `GET`/`HEAD` failures, and retry connection and TLS handshake
-failures for every method (`CGC_HTTP_RETRIES`). HTTP and HTTPS proxies are
+failures for every method (`CGC_HTTP_RETRIES`). A clone, fetch, or pull also
+repeats the whole operation when a transfer fails after the request was sent,
+such as a reset while receiving refs or a pack. HTTP and HTTPS proxies are
 honored through `http_proxy`, `https_proxy`, `all_proxy`, and `NO_PROXY`,
 including proxy credentials and `CONNECT` tunnelling. Self-contained packs
 received over HTTP are kept as `objects/pack/pack-<sha>.pack` with a v2 `.idx`;

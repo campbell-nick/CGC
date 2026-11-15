@@ -394,7 +394,8 @@ static void select_default_ref(RemoteRefs *out)
     }
 }
 
-int protocol_ls_refs(const char *url, int all_refs, RemoteRefs *out)
+static int protocol_ls_refs_once(const char *url, int all_refs,
+                                 RemoteRefs *out)
 {
     memset(out, 0, sizeof(*out));
 
@@ -468,6 +469,31 @@ int protocol_ls_refs(const char *url, int all_refs, RemoteRefs *out)
 
     select_default_ref(out);
     return 0;
+}
+
+static void retry_notice(int attempt, int retries)
+{
+    if (!cgc_quiet)
+        fprintf(stderr,
+                "cgc: retrying after a transient network failure (%d/%d)...\n",
+                attempt + 1, retries);
+}
+
+int protocol_ls_refs(const char *url, int all_refs, RemoteRefs *out)
+{
+    int retries = http_operation_retries();
+    for (int attempt = 0;; attempt++) {
+        int rc = protocol_ls_refs_once(url, all_refs, out);
+        if (rc == 0 || attempt >= retries || cgc_interrupted ||
+            !http_last_error_transient()) {
+            if (rc != 0 && http_last_error_transient())
+                http_emit_transient_error();
+            return rc;
+        }
+        remote_refs_free(out);
+        retry_notice(attempt, retries);
+        http_operation_retry_sleep(attempt);
+    }
 }
 
 void remote_refs_free(RemoteRefs *r)
@@ -1049,9 +1075,10 @@ static int protocol_fetch_v0(const char *url, const RemoteRefs *refs,
     return rc;
 }
 
-int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
-                   int depth, const unsigned char (*haves)[OID_RAW],
-                   size_t nhaves)
+static int protocol_fetch_once(const char *url, const RemoteRefs *refs,
+                               const char *gitdir, int depth,
+                               const unsigned char (*haves)[OID_RAW],
+                               size_t nhaves)
 {
     if (refs->empty)
         return 0;
@@ -1169,4 +1196,22 @@ int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
     buf_free(&pack);
     free(demux.shallow);
     return rc;
+}
+
+int protocol_fetch(const char *url, const RemoteRefs *refs, const char *gitdir,
+                   int depth, const unsigned char (*haves)[OID_RAW],
+                   size_t nhaves)
+{
+    int retries = http_operation_retries();
+    for (int attempt = 0;; attempt++) {
+        int rc = protocol_fetch_once(url, refs, gitdir, depth, haves, nhaves);
+        if (rc == 0 || attempt >= retries || cgc_interrupted ||
+            !http_last_error_transient()) {
+            if (rc != 0 && http_last_error_transient())
+                http_emit_transient_error();
+            return rc;
+        }
+        retry_notice(attempt, retries);
+        http_operation_retry_sleep(attempt);
+    }
 }

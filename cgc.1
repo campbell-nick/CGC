@@ -398,8 +398,10 @@ Number of retries for idempotent
 .B GET
 and
 .B HEAD
-requests after a transient failure (408, 429, 500, 502, 503, or 504).
-Defaults to 2.
+requests after a transient failure (408, 429, 500, 502, 503, or 504), and for
+repeating a whole clone, fetch, or pull when a transfer fails after the request
+has been sent, such as a reset while receiving refs or a pack. Defaults to 2;
+set to 0 to disable retries.
 .TP
 .B http_proxy ", " https_proxy ", " all_proxy
 Proxy URL for plain HTTP, HTTPS, or all requests. The uppercase names are
@@ -475,7 +477,8 @@ limits the fetch; a bare repository with no fetch refspec records only
 .BR FETCH_HEAD ;
 tags are fetched in full rather than Git's
 reachability-based auto-follow; submodules are not cloned or updated; no partial
-clone, LFS, hooks, or reflogs; no retry or resume on network failures.
+clone, LFS, hooks, or reflogs; retries restart a clone or fetch from the
+beginning rather than resuming a partially transferred pack.
 .SH "SEE ALSO"
 .BR git-clone (1),
 .BR git-upload-pack (1),

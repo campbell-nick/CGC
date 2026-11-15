@@ -8,8 +8,9 @@
   worktrees (`.git` files and `commondir`), packed refs, and source packfiles
 - Redirects, chunked transfer encoding, and verified TLS
 - Connect, read, and write timeouts (`CGC_HTTP_TIMEOUT`), retries with backoff
-  for transient `GET`/`HEAD` failures, and retries for connection/TLS failures
-  before a request is sent (`CGC_HTTP_RETRIES`)
+  for transient `GET`/`HEAD` failures, retries for connection/TLS failures
+  before a request is sent, and whole-operation retries when a clone, fetch,
+  or pull fails after the request has started (`CGC_HTTP_RETRIES`)
 - HTTP and HTTPS proxies (`http_proxy`, `https_proxy`, `all_proxy`), proxy
   authentication, and `NO_PROXY` bypass
 - Branches, annotated tags, remote-tracking refs
